@@ -1,0 +1,90 @@
+scene: Merom_0_int
+
+zones:
+  entry_living:
+    center: [3.37, 9.74, 0.0]
+  living_room:
+    center: [4.04, 7.43, 0.0]
+  bathroom:
+    center: [3.12, 5.25, 0.0]
+  bedroom:
+    center: [4.65, 1.55, 0.0]
+  utility_room:
+    center: [-0.9, -0.85, 0.0]
+
+motion_sensors:
+  - sensor_id: motion_entry_door_wall
+    zone: entry_living
+    placement: ceiling directly in front of the entrance door, downward wide coverage
+    position: [3.37, 9.74, 2.58]
+    yaw_deg: 0.0
+    range_m: 1.55
+    fov_deg: 360.0
+
+  - sensor_id: motion_living_tv_console
+    zone: living_room
+    placement: between TV screen and shelf, looking toward the sofa without piercing the TV
+    position: [4.50, 9.03, 0.95]
+    yaw_deg: 180.0
+    range_m: 2.65
+    fov_deg: 62.0
+
+  - sensor_id: motion_living_coffee_ceiling
+    zone: living_room
+    placement: ceiling above coffee table, downward/wide coverage
+    position: [4.04, 7.43, 2.35]
+    yaw_deg: 0.0
+    range_m: 2.0
+    fov_deg: 360.0
+
+  - sensor_id: motion_bath_left_wall
+    zone: bathroom
+    placement: left wall after bathroom entrance, looking right across the room
+    position: [3.12, 5.25, 1.55]
+    yaw_deg: 0.0
+    range_m: 1.95
+    fov_deg: 76.0
+
+  - sensor_id: motion_bedroom_entry_wall
+    zone: bedroom
+    placement: provisional bedroom entry wall coverage
+    position: [4.65, 1.55, 1.65]
+    yaw_deg: 165.0
+    range_m: 2.5
+    fov_deg: 82.0
+
+  - sensor_id: motion_bedroom_sofa_wall
+    zone: bedroom
+    placement: deeper bedroom wall coverage toward the sofa corner
+    position: [4.90, 0.20, 1.60]
+    yaw_deg: -112.0
+    range_m: 2.0
+    fov_deg: 76.0
+
+  - sensor_id: motion_utility_table_ceiling
+    zone: utility_room
+    placement: ceiling coverage over the empty left utility area, intentionally separated from laundry coverage
+    position: [-1.75, 0.25, 2.35]
+    yaw_deg: 0.0
+    range_m: 0.85
+    fov_deg: 360.0
+
+  - sensor_id: motion_utility_laundry_ceiling
+    zone: utility_room
+    placement: ceiling coverage above washer and dryer side, intentionally separated from left utility coverage
+    position: [0.20, -1.10, 2.35]
+    yaw_deg: 0.0
+    range_m: 0.85
+    fov_deg: 360.0
+
+pressure_sensors:
+  - sensor_id: pressure_sensor_0
+    zone: laundry
+    position: [0.0, 0.0, 0.02]
+    size: [0.8, 0.8, 0.03]
+    threshold_kg: 6.0
+    visual: false
+
+encoder:
+  zone_order: [entry_living, living_room, bathroom, bedroom, utility_room]
+  pressure_max_kg: 12.0

@@ -1,0 +1,48 @@
+{
+  "replays": [
+    {
+      "replay_id": "delivery_living_room_merom",
+      "task": "deliver_item",
+      "path": "replays/merom_0_int/delivery/living_room.json",
+      "trigger": {
+        "resident_zone": "living_room"
+      },
+      "initial_state": "merom_home_default",
+      "final_state": "merom_home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "delivery_kitchen_merom",
+      "task": "deliver_item",
+      "path": "replays/merom_0_int/delivery/kitchen.json",
+      "trigger": {
+        "resident_zone": "kitchen"
+      },
+      "initial_state": "merom_home_default",
+      "final_state": "merom_home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "delivery_bedroom_merom",
+      "task": "deliver_item",
+      "path": "replays/merom_0_int/delivery/bedroom.json",
+      "trigger": {
+        "resident_zone": "bedroom"
+      },
+      "initial_state": "merom_home_default",
+      "final_state": "merom_home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "laundry_basket_to_washer_merom",
+      "task": "laundry",
+      "path": "replays/merom_0_int/laundry/basket_to_washer.json",
+      "trigger": {
+        "pressure_triggered": true
+      },
+      "initial_state": "merom_home_default",
+      "final_state": "merom_home_default",
+      "duration_s": null
+    }
+  ]
+}

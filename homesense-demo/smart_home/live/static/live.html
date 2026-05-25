@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeSense Live OmniGibson Control</title>
+  <link rel="stylesheet" href="/static/live.css">
+</head>
+<body>
+  <main class="monitor">
+    <img id="videoStream" src="/video.mjpg" alt="Live OmniGibson camera stream">
+
+    <header class="statusBar">
+      <div>
+        <strong>HomeSense Live</strong>
+        <span id="connectionStatus">Connecting</span>
+      </div>
+      <button id="resetButton" title="Reset scene">Reset</button>
+    </header>
+
+    <section class="cameraPanel" aria-label="Camera controls">
+      <label for="cameraSelect">Camera</label>
+      <select id="cameraSelect">
+        <option value="viewer:overview">Top Overview</option>
+        <option value="viewer:robot">Robot Follow</option>
+        <option value="viewer:resident">Resident Follow</option>
+        <option value="robot:robot">Robot Camera</option>
+      </select>
+      <label class="toggleRow" for="sensorRangeToggle">
+        <span>Sensor ranges</span>
+        <input id="sensorRangeToggle" type="checkbox">
+      </label>
+    </section>
+
+    <section class="taskPanel" aria-label="Robot task controls">
+      <label for="taskSelect">Task</label>
+      <div class="taskRow">
+        <select id="taskSelect">
+          <option value="deliver_item">Deliver Item</option>
+          <option value="laundry">Laundry</option>
+        </select>
+        <button id="runTaskButton">Run</button>
+      </div>
+      <p id="robotState">idle</p>
+    </section>
+
+    <section class="inputHint" aria-label="Resident input">
+      <div id="inputKeys" class="keyGrid"></div>
+      <p id="inputState">Arrow keys</p>
+    </section>
+
+    <section class="telemetry" aria-label="Live sensor summary">
+      <span id="motionState">Motion --</span>
+      <span id="residentState">Resident --</span>
+      <span id="pressureState">Pressure --</span>
+      <span id="cameraState">Camera --</span>
+    </section>
+  </main>
+  <script src="/static/live.js"></script>
+</body>
+</html>

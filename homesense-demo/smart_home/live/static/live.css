@@ -1,0 +1,269 @@
+* { box-sizing: border-box; }
+
+:root {
+  color-scheme: dark;
+  --panel: rgba(11, 18, 30, .72);
+  --panel-strong: rgba(11, 18, 30, .9);
+  --line: rgba(191, 209, 232, .22);
+  --text: #eef5ff;
+  --muted: #aebbd0;
+  --accent: #2f9d8f;
+  --button: #18263a;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #05080d;
+  color: var(--text);
+}
+
+button,
+select {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--button);
+  color: var(--text);
+  padding: 0 12px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled),
+select:hover {
+  border-color: rgba(47, 157, 143, .9);
+}
+
+button:disabled,
+select:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.monitor {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  background: #05080d;
+}
+
+#videoStream {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #05080d;
+}
+
+.statusBar,
+.cameraPanel,
+.taskPanel,
+.inputHint,
+.telemetry {
+  position: absolute;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .28);
+}
+
+.statusBar {
+  top: 18px;
+  left: 18px;
+  right: 18px;
+  min-height: 54px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 12px 10px 16px;
+}
+
+.statusBar strong {
+  display: block;
+  font-size: 17px;
+  letter-spacing: 0;
+}
+
+.statusBar span,
+.taskPanel p,
+.inputHint p {
+  display: block;
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cameraPanel,
+.taskPanel {
+  right: 18px;
+  width: min(320px, calc(100vw - 36px));
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.cameraPanel {
+  top: 90px;
+}
+
+.taskPanel {
+  bottom: 18px;
+}
+
+label {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.toggleRow {
+  min-height: 36px;
+  margin: 12px 0 0;
+  border-top: 1px solid rgba(238, 245, 255, .12);
+  padding-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-transform: none;
+}
+
+.toggleRow input {
+  width: 38px;
+  min-height: 22px;
+  accent-color: var(--accent);
+}
+
+select {
+  width: 100%;
+}
+
+.taskRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+#runTaskButton {
+  background: var(--accent);
+  border-color: transparent;
+  color: #02110f;
+  font-weight: 700;
+}
+
+.inputHint {
+  left: 18px;
+  bottom: 18px;
+  width: 188px;
+  min-height: 112px;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.keyGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 38px);
+  grid-template-rows: repeat(2, 34px);
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+}
+
+.keyGrid.overview {
+  grid-template-areas:
+    ". w ."
+    "a s d";
+}
+
+.keyGrid.resident,
+.keyGrid.locked {
+  grid-template-areas:
+    "q w e"
+    "a s d";
+}
+
+kbd {
+  min-width: 38px;
+  min-height: 34px;
+  border: 1px solid rgba(238, 245, 255, .3);
+  border-bottom-color: rgba(238, 245, 255, .14);
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: rgba(238, 245, 255, .1);
+  color: var(--text);
+  font: 700 13px/1 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.keyW { grid-area: w; }
+.keyA { grid-area: a; }
+.keyS { grid-area: s; }
+.keyD { grid-area: d; }
+.keyQ { grid-area: q; }
+.keyE { grid-area: e; }
+
+.telemetry {
+  left: 224px;
+  bottom: 18px;
+  max-width: calc(100vw - 602px);
+  min-height: 64px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.telemetry span {
+  min-height: 28px;
+  border: 1px solid rgba(238, 245, 255, .14);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 11px;
+  color: var(--muted);
+  background: rgba(238, 245, 255, .07);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .statusBar {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+  }
+
+  .cameraPanel {
+    top: 78px;
+    right: 10px;
+  }
+
+  .taskPanel {
+    right: 10px;
+    bottom: 10px;
+  }
+
+  .inputHint {
+    left: 10px;
+    bottom: 10px;
+  }
+
+  .telemetry {
+    display: none;
+  }
+}

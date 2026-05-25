@@ -1,0 +1,52 @@
+# Local runtime / OS files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+core
+
+# Python / Node build outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+dist/
+build/
+out/
+
+# Large archives and transferred asset bundles
+*.zip
+*.tar
+*.tar.zst
+*.zst
+*.7z
+*.rar
+*.sha256
+drive-download-*/
+drive-download-*.zip
+collab_env_export_*/
+
+# BEHAVIOR / OmniGibson source and datasets are not tracked from this repo.
+# We keep a small HomeSense code snapshot under homesense-demo/ instead.
+BEHAVIOR-1K/
+sensor-implementation-package-main/
+
+# Dataset / simulator assets should be shared out-of-band.
+datasets/
+asset_pipeline/
+omnigibson-robot-assets/
+behavior-1k-assets/
+
+# Local app runtime data
+logs/
+*.jsonl
+
+# Root-level working copies mirrored into docs/
+/PROJECT_STATUS.md
+/4A_Implementation_Detail_Draft.md
+/NETWORK_TECH_STACK_QA.md
+/PRESENTATION_VISUAL_ASSETS_GUIDE.md
+/센서 정보.md
+/2026-C&S Project_*.pdf

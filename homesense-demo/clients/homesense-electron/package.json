@@ -1,0 +1,39 @@
+{
+  "name": "homesense-client",
+  "version": "0.1.0",
+  "description": "HomeSense remote monitoring client for the OmniGibson live demo",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:kiosk": "HOMESENSE_KIOSK=1 electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/app.js",
+    "pack:mac": "electron-builder --mac dmg",
+    "pack:linux": "electron-builder --linux AppImage"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "kr.csp2026k.homesense",
+    "productName": "HomeSense Client",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    }
+  }
+}

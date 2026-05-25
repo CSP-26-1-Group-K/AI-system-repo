@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeSense Client</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="monitor">
+    <img id="videoStream" alt="Live OmniGibson camera stream">
+
+    <section id="connectPanel" class="connectPanel">
+      <h1>HomeSense Client</h1>
+      <label for="serverUrlInput">DGX Server</label>
+      <div class="serverRow">
+        <input id="serverUrlInput" type="url" placeholder="http://10.32.253.88:8080">
+        <button id="connectButton">Connect</button>
+      </div>
+      <p id="connectMessage">Enter the live server URL.</p>
+    </section>
+
+    <header class="statusBar">
+      <div>
+        <strong>HomeSense Live</strong>
+        <span id="connectionStatus">Disconnected</span>
+      </div>
+      <div class="statusActions">
+        <button id="settingsButton" title="Change server">Server</button>
+        <button id="resetButton" title="Reset scene">Reset</button>
+      </div>
+    </header>
+
+    <section class="cameraPanel" aria-label="Camera controls">
+      <label for="cameraSelect">Camera</label>
+      <select id="cameraSelect">
+        <option value="viewer:overview">Top Overview</option>
+        <option value="viewer:robot">Robot Follow</option>
+        <option value="viewer:resident">Resident Follow</option>
+        <option value="robot:robot">Robot Camera</option>
+      </select>
+      <label class="toggleRow" for="sensorRangeToggle">
+        <span>Sensor ranges</span>
+        <input id="sensorRangeToggle" type="checkbox">
+      </label>
+    </section>
+
+    <section class="taskPanel" aria-label="Robot task controls">
+      <label for="taskSelect">Task</label>
+      <div class="taskRow">
+        <select id="taskSelect">
+          <option value="deliver_item">Deliver Item</option>
+          <option value="laundry">Laundry</option>
+        </select>
+        <button id="runTaskButton">Run</button>
+      </div>
+      <p id="robotState">idle</p>
+    </section>
+
+    <section class="inputHint" aria-label="Resident input">
+      <div id="inputKeys" class="keyGrid"></div>
+      <p id="inputState">Arrow keys</p>
+    </section>
+
+    <section class="telemetry" aria-label="Live sensor summary">
+      <span id="motionState">Motion --</span>
+      <span id="residentState">Resident --</span>
+      <span id="pressureState">Pressure --</span>
+      <span id="cameraState">Camera --</span>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

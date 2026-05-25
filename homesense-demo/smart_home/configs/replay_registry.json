@@ -1,0 +1,48 @@
+{
+  "replays": [
+    {
+      "replay_id": "delivery_living_room",
+      "task": "deliver_item",
+      "path": "replays/delivery/living_room.json",
+      "trigger": {
+        "resident_zone": "living_room"
+      },
+      "initial_state": "home_default",
+      "final_state": "home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "delivery_kitchen",
+      "task": "deliver_item",
+      "path": "replays/delivery/kitchen.json",
+      "trigger": {
+        "resident_zone": "kitchen"
+      },
+      "initial_state": "home_default",
+      "final_state": "home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "delivery_bedroom",
+      "task": "deliver_item",
+      "path": "replays/delivery/bedroom.json",
+      "trigger": {
+        "resident_zone": "bedroom"
+      },
+      "initial_state": "home_default",
+      "final_state": "home_default",
+      "duration_s": null
+    },
+    {
+      "replay_id": "laundry_basket_to_washer",
+      "task": "laundry",
+      "path": "replays/laundry/basket_to_washer.json",
+      "trigger": {
+        "pressure_triggered": true
+      },
+      "initial_state": "home_default",
+      "final_state": "home_default",
+      "duration_s": null
+    }
+  ]
+}
