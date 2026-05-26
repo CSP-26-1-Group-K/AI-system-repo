@@ -37,6 +37,9 @@ from smart_home.live.constants import (
     CEILING_MODEL_IDS,
     HUMAN_COMMAND_LIMIT_M,
     HUMAN_MOVE_SPEED_MPS,
+    VIEWPORT_CAMERA_KEYS,
+    VIEWPORT_MOVE_STEP_M,
+    VIEWPORT_ROTATION_STEP_DEG,
     HUMAN_RADIUS_M,
     MEROM_DOORLESS_PORTALS,
     MEROM_HUMAN_START_POS,
@@ -93,6 +96,7 @@ class LiveControlledScene:
         self.scene_bounds = None
         self.collision_obstacles = []
         self.sensor_ranges_visible = False
+        self.viewport_camera_modes = ("overview", "resident", "robot")
 
     def setup(self):
         preset = PRESETS[self.args.preset]
@@ -409,11 +413,11 @@ class LiveControlledScene:
         bridge.set_sensor_ranges_visible = self.queue_set_sensor_ranges_visible
         bridge.get_state = self.snapshot
 
-    def queue_move_human_delta(self, dx, dy, dz=0.0):
+    def queue_move_human_delta(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy or self.pending_robot_task:
             return {"event": "move_human_blocked", "reason": "robot task is running"}
-        self.command_queue.put(("move_human_delta", (float(dx), float(dy), float(dz))))
-        return {"event": "move_human_queued", "dx": dx, "dy": dy, "dz": dz}
+        self.command_queue.put(("move_human_delta", (float(dx), float(dy), float(dz), bool(face_movement))))
+        return {"event": "move_human_queued", "dx": dx, "dy": dy, "dz": dz, "face_movement": bool(face_movement)}
 
     def queue_set_human_input(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy or self.pending_robot_task:
@@ -522,18 +526,102 @@ class LiveControlledScene:
     def configure_keyboard(self):
         KeyboardEventHandler.initialize()
         KeyboardEventHandler.add_keyboard_callback(lazy.carb.input.KeyboardInput.ESCAPE, lambda: og.shutdown())
-        key_moves = {
-            "UP": (0.0, 0.045, 0.0),
-            "DOWN": (0.0, -0.045, 0.0),
-            "LEFT": (-0.045, 0.0, 0.0),
-            "RIGHT": (0.045, 0.0, 0.0),
-        }
-        for key_name, delta in key_moves.items():
+        for key_name in ("W", "A", "S", "D", "UP", "LEFT", "DOWN", "RIGHT"):
             key = getattr(lazy.carb.input.KeyboardInput, key_name, None)
             if key is not None:
-                KeyboardEventHandler.add_keyboard_callback(key, lambda d=delta: self.move_human_delta(*d))
+                KeyboardEventHandler.add_keyboard_callback(key, lambda name=key_name: self.queue_viewport_move(name))
+        for key_name, delta in {"Q": VIEWPORT_ROTATION_STEP_DEG, "E": -VIEWPORT_ROTATION_STEP_DEG}.items():
+            key = getattr(lazy.carb.input.KeyboardInput, key_name, None)
+            if key is not None:
+                KeyboardEventHandler.add_keyboard_callback(key, lambda d=delta: self.queue_viewport_rotate(d))
+        for key_name, mode in VIEWPORT_CAMERA_KEYS.items():
+            key = getattr(lazy.carb.input.KeyboardInput, key_name, None)
+            if key is not None:
+                KeyboardEventHandler.add_keyboard_callback(key, lambda m=mode: self.queue_set_camera(m))
+        key = getattr(lazy.carb.input.KeyboardInput, "C", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_cycle_viewport_camera)
+        key = getattr(lazy.carb.input.KeyboardInput, "F", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_toggle_sensor_ranges)
+        key = getattr(lazy.carb.input.KeyboardInput, "R", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_reset_scene)
+        key = getattr(lazy.carb.input.KeyboardInput, "T", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, lambda: self.queue_run_task("deliver_item"))
+        key = getattr(lazy.carb.input.KeyboardInput, "Y", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, lambda: self.queue_run_task("laundry"))
+        self.print_viewport_controls()
 
-    def move_human_delta(self, dx, dy, dz=0.0):
+    def print_viewport_controls(self):
+        print(
+            "\nHomeSense viewport controls\n"
+            "  1: Top overview camera\n"
+            "  2: Resident follow camera\n"
+            "  3: Robot follow camera\n"
+            "  C: Cycle camera mode\n"
+            "  W/A/S/D or arrow keys: Move resident in overview; move relative to resident in resident follow\n"
+            "  Q/E: Rotate resident in resident follow\n"
+            "  F: Toggle motion sensor ranges\n"
+            "  T/Y: Trigger deliver-item / laundry replay placeholder\n"
+            "  R: Reset scene\n"
+            "  Esc: Quit\n",
+            flush=True,
+        )
+
+    def queue_viewport_move(self, key_name):
+        dx, dy, face_movement = self.viewport_move_delta(key_name)
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return {"event": "viewport_move_ignored", "camera_mode": self.state.camera_mode, "key": key_name}
+        return self.queue_move_human_delta(dx, dy, 0.0, face_movement=face_movement)
+
+    def queue_viewport_rotate(self, delta_deg):
+        if self.state.camera_mode != "resident":
+            return {"event": "viewport_rotate_ignored", "camera_mode": self.state.camera_mode}
+        return self.queue_rotate_human_heading(delta_deg)
+
+    def viewport_move_delta(self, key_name):
+        mode = self.state.camera_mode
+        key_name = str(key_name).upper()
+        key_alias = {"UP": "W", "LEFT": "A", "DOWN": "S", "RIGHT": "D"}.get(key_name, key_name)
+        step = VIEWPORT_MOVE_STEP_M
+        if mode == "resident":
+            heading = math.radians(self.human_heading_deg)
+            forward = [-math.sin(heading), math.cos(heading)]
+            right = [math.cos(heading), math.sin(heading)]
+            if key_alias == "W":
+                return forward[0] * step, forward[1] * step, False
+            if key_alias == "S":
+                return -forward[0] * step, -forward[1] * step, False
+            if key_alias == "A":
+                return -right[0] * step, -right[1] * step, False
+            if key_alias == "D":
+                return right[0] * step, right[1] * step, False
+            return 0.0, 0.0, False
+        if mode == "overview":
+            if key_alias == "W":
+                return step, 0.0, True
+            if key_alias == "S":
+                return -step, 0.0, True
+            if key_alias == "A":
+                return 0.0, step, True
+            if key_alias == "D":
+                return 0.0, -step, True
+        return 0.0, 0.0, False
+
+    def queue_cycle_viewport_camera(self):
+        try:
+            idx = self.viewport_camera_modes.index(self.state.camera_mode)
+        except ValueError:
+            idx = 0
+        return self.queue_set_camera(self.viewport_camera_modes[(idx + 1) % len(self.viewport_camera_modes)])
+
+    def queue_toggle_sensor_ranges(self):
+        return self.queue_set_sensor_ranges_visible(not self.sensor_ranges_visible)
+
+    def move_human_delta(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy:
             return {"event": "move_human_blocked", "reason": "robot task is running"}
         dx = max(-HUMAN_COMMAND_LIMIT_M, min(HUMAN_COMMAND_LIMIT_M, float(dx)))
@@ -546,10 +634,18 @@ class LiveControlledScene:
             self.read_sensors()
             return {"event": "move_human_blocked", "reason": "collision", "blocked_by": blocked_by, "position": base_pos}
         self.human_target_pos = next_pos
-        if abs(dx) > 1e-5 or abs(dy) > 1e-5:
+        if face_movement and (abs(dx) > 1e-5 or abs(dy) > 1e-5):
             self.human_heading_deg = self.heading_from_world_vector(dx, dy)
         self.read_sensors()
-        return {"event": "move_human_delta", "target_position": next_pos, "dx": dx, "dy": dy, "dz": dz}
+        return {
+            "event": "move_human_delta",
+            "target_position": next_pos,
+            "dx": dx,
+            "dy": dy,
+            "dz": dz,
+            "face_movement": bool(face_movement),
+            "heading_deg": self.human_heading_deg,
+        }
 
     def set_human_input(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy:
@@ -904,6 +1000,11 @@ def main():
     parser.add_argument("--preset", choices=sorted(PRESETS), default="wider_house")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument(
+        "--serve-client",
+        action="store_true",
+        help="Also start the legacy FastAPI browser/Electron gateway. Viewport-only demos leave this disabled.",
+    )
     parser.add_argument("--scene-model", default=None, help="Override the preset BEHAVIOR scene model, e.g. Merom_0_int.")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--clean-structure-materials", action="store_true", default=True)
@@ -954,9 +1055,11 @@ def main():
 
     scene = LiveControlledScene(args)
     scene.setup()
-    start_server(args.host, args.port)
-    print(f"Live control server: http://{args.host}:{args.port}", flush=True)
-    print("Use client arrow keys or Isaac viewer arrow keys to move the resident.", flush=True)
+    if args.serve_client:
+        start_server(args.host, args.port)
+        print(f"Live control server: http://{args.host}:{args.port}", flush=True)
+    else:
+        print("FastAPI/Electron gateway disabled. Use the OmniGibson / Isaac Sim viewport controls.", flush=True)
     scene.run()
 
 

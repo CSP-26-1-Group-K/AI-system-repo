@@ -1,6 +1,6 @@
 # CSP-2026-K Project Status
 
-Last updated: 2026-05-24
+Last updated: 2026-05-26
 
 ## Project Goal
 
@@ -241,6 +241,41 @@ The target demo is a monitoring/control app connected to an OmniGibson digital t
     - zip archive size: approximately 1.1 GB
     - zip archive SHA256: `55e5e2185abf6b7e77be09982025dd4e692b6bddfedfd2b9d53c3ed0028e6fc6`
     - verified the zip archive with `zip -T`
+
+38. Pivoted the demo direction from a separate Electron monitoring app to an OmniGibson / Isaac Sim viewport-centered AI system demo:
+    - Electron/browser clients are now treated as a frozen auxiliary monitoring path, not the primary demonstration surface
+    - `smart_home/live/runner.py` now supports viewport-first operation without starting the FastAPI/Electron gateway by default
+    - added `--serve-client` for explicitly enabling the legacy FastAPI browser/Electron gateway when needed
+    - added Isaac viewport keyboard controls:
+      - `1`: top overview camera
+      - `2`: resident follow camera
+      - `3`: robot follow camera
+      - `C`: cycle camera mode
+      - `W/A/S/D` or arrow keys: move resident in overview mode
+      - `W/A/S/D`: move resident relative to current heading in resident follow mode
+      - `Q/E`: rotate resident heading in resident follow mode
+      - `F`: toggle motion sensor range visualization
+      - `T/Y`: trigger deliver-item / laundry replay placeholders
+      - `R`: reset scene
+      - `Esc`: quit
+    - movement commands are routed through the simulator command queue so viewport controls and server controls share the same execution path
+    - top overview movement still faces the resident toward movement direction, while resident-follow movement preserves heading and uses `Q/E` for rotation
+    - camera follow and ceiling visibility logic remain active in the viewport path
+
+## Current Direction Update
+
+The primary demo direction is now a **Digital Twin data-generation and AI-training loop**, not a polished service-monitoring client.
+
+Target demonstration loop:
+
+1. Show the real OmniGibson / Isaac Sim viewport with the `Merom_0_int` scene.
+2. Execute resident / robot / replay behavior directly in the twin.
+3. Generate sensor, scene, robot-state, action, and context logs from twin behavior.
+4. Convert these logs into an episode dataset.
+5. Train or update a robot/task model from the generated dataset.
+6. Re-inject the learned or selected behavior into the twin for validation.
+
+The sensor system is currently positioned as a deterministic context generator rather than a standalone AI prediction target. Sensor context should condition robot data collection and policy/replay selection.
 
 ## Important Decisions
 

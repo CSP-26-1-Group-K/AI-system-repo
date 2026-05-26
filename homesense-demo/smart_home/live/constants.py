@@ -10,6 +10,13 @@ CEILING_HIDDEN_CAMERA_MODES = {"overview"}
 HUMAN_RADIUS_M = 0.24
 HUMAN_MOVE_SPEED_MPS = 1.15
 HUMAN_COMMAND_LIMIT_M = 0.12
+VIEWPORT_MOVE_STEP_M = 0.08
+VIEWPORT_ROTATION_STEP_DEG = 15.0
+VIEWPORT_CAMERA_KEYS = {
+    "KEY_1": "overview",
+    "KEY_2": "resident",
+    "KEY_3": "robot",
+}
 
 OBSTACLE_MIN_HEIGHT_M = 0.16
 DOOR_NAME_TOKENS = ("door", "doors", "doorknob", "doorframe")
