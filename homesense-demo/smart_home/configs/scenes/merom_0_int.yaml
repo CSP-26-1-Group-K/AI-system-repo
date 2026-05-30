@@ -1,0 +1,238 @@
+scene_model: Merom_0_int
+
+resident:
+  start_position: [2.55, 8.55, 0.0]
+
+robot:
+  model: R1Pro
+  start_position: [0.0, 0.0, 0.0053]
+  start_yaw_deg: 0.0
+  forward_axis: "+X"
+  start_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  note: "Explicit replay collection reference pose. Observed OmniGibson default was approximately [0, 0, 0.005285], yaw 0 deg."
+
+overview_camera:
+  auto_from_scene_bounds: true
+
+zones:
+  entry_living:
+    center: [3.37, 9.74, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [3.37, 9.72, 0.0]
+      - [3.55, 9.58, 0.0]
+      - [3.18, 9.58, 0.0]
+  living_room:
+    center: [4.04, 7.43, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [3.35, 7.43, 0.0]
+      - [3.52, 7.05, 0.0]
+      - [3.58, 7.82, 0.0]
+      - [4.15, 7.25, 0.0]
+  bathroom:
+    center: [3.12, 5.25, 0.0]
+    spawn_radius_m: 0.10
+    spawn_points:
+      - [3.10, 5.25, 0.0]
+      - [2.92, 5.18, 0.0]
+      - [3.18, 5.48, 0.0]
+  bedroom:
+    center: [4.65, 1.55, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [4.28, 1.45, 0.0]
+      - [4.45, 1.95, 0.0]
+      - [3.85, 1.35, 0.0]
+      - [4.65, 2.45, 0.0]
+  utility_room:
+    center: [-0.9, -0.85, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [-1.45, -0.70, 0.0]
+      - [-1.35, -1.18, 0.0]
+      - [-0.72, -1.08, 0.0]
+
+motion_sensors:
+  - sensor_id: motion_entry_door_wall
+    zone: entry_living
+    placement: ceiling directly in front of the entrance door, downward wide coverage
+    position: [3.37, 9.74, 2.58]
+    yaw_deg: 0.0
+    range_m: 1.55
+    fov_deg: 360.0
+
+  - sensor_id: motion_living_tv_console
+    zone: living_room
+    placement: between TV screen and shelf, looking toward the sofa without piercing the TV
+    position: [4.50, 9.03, 0.95]
+    yaw_deg: 180.0
+    range_m: 2.65
+    fov_deg: 62.0
+
+  - sensor_id: motion_living_coffee_ceiling
+    zone: living_room
+    placement: ceiling above coffee table, downward/wide coverage
+    position: [4.04, 7.43, 2.35]
+    yaw_deg: 0.0
+    range_m: 2.0
+    fov_deg: 360.0
+
+  - sensor_id: motion_bath_left_wall
+    zone: bathroom
+    placement: left wall after bathroom entrance, looking right across the room
+    position: [3.12, 5.25, 1.55]
+    yaw_deg: 0.0
+    range_m: 1.95
+    fov_deg: 76.0
+
+  - sensor_id: motion_bedroom_entry_wall
+    zone: bedroom
+    placement: provisional bedroom entry wall coverage
+    position: [4.65, 1.55, 1.65]
+    yaw_deg: 165.0
+    range_m: 2.5
+    fov_deg: 82.0
+
+  - sensor_id: motion_bedroom_sofa_wall
+    zone: bedroom
+    placement: deeper bedroom wall coverage toward the sofa corner
+    position: [4.90, 0.20, 1.60]
+    yaw_deg: -112.0
+    range_m: 2.0
+    fov_deg: 76.0
+
+  - sensor_id: motion_utility_table_ceiling
+    zone: utility_room
+    placement: ceiling coverage over the empty left utility area, intentionally separated from laundry coverage
+    position: [-1.75, 0.25, 2.35]
+    yaw_deg: 0.0
+    range_m: 0.85
+    fov_deg: 360.0
+
+  - sensor_id: motion_utility_laundry_ceiling
+    zone: utility_room
+    placement: ceiling coverage above washer and dryer side, intentionally separated from left utility coverage
+    position: [0.20, -1.10, 2.35]
+    yaw_deg: 0.0
+    range_m: 0.85
+    fov_deg: 360.0
+
+pressure_sensors:
+  - sensor_id: pressure_sensor_0
+    zone: laundry
+    position: [0.0, 0.0, 0.02]
+    size: [0.8, 0.8, 0.03]
+    threshold_kg: 6.0
+    visual: false
+
+encoder:
+  zone_order: [entry_living, living_room, bathroom, bedroom, utility_room]
+  pressure_max_kg: 12.0
+
+activity_profiles:
+  entry_living:
+    - activity_id: arriving_home
+      weight: 1.0
+      confidence: 0.82
+      sensors:
+        entry_floor_mat: occupied
+        entry_light: on
+        front_door_contact: recently_opened
+        ambient_noise_db: 42
+
+  living_room:
+    - activity_id: watching_tv
+      weight: 0.7
+      confidence: 0.88
+      sensors:
+        sofa_pressure: occupied
+        tv_power: on
+        living_room_light: dim
+        ambient_noise_db: 50
+    - activity_id: resting_on_sofa
+      weight: 0.3
+      confidence: 0.84
+      sensors:
+        sofa_pressure: occupied
+        tv_power: off
+        living_room_light: on
+        ambient_noise_db: 34
+
+  bathroom:
+    - activity_id: showering
+      weight: 0.7
+      confidence: 0.9
+      sensors:
+        bathroom_floor_mat: occupied
+        shower_flow: on
+        bathroom_humidity_pct: 78
+        bathroom_light: on
+    - activity_id: bathroom_visit
+      weight: 0.3
+      confidence: 0.8
+      sensors:
+        bathroom_floor_mat: occupied
+        shower_flow: off
+        bathroom_humidity_pct: 48
+        bathroom_light: on
+
+  bedroom:
+    - activity_id: resting_in_bedroom
+      weight: 0.65
+      confidence: 0.86
+      sensors:
+        bed_pressure: occupied
+        bedroom_light: dim
+        ambient_noise_db: 30
+    - activity_id: bedroom_activity
+      weight: 0.35
+      confidence: 0.76
+      sensors:
+        bed_pressure: empty
+        bedroom_light: on
+        ambient_noise_db: 36
+
+  utility_room:
+    - activity_id: doing_laundry
+      weight: 0.75
+      confidence: 0.88
+      sensors:
+        utility_floor_mat: occupied
+        washing_machine_state: running
+        laundry_weight_kg: 7.2
+        utility_light: on
+    - activity_id: checking_laundry
+      weight: 0.25
+      confidence: 0.78
+      sensors:
+        utility_floor_mat: occupied
+        washing_machine_state: idle
+        laundry_weight_kg: 2.2
+        utility_light: on
+
+doorless_scene_file: datasets/behavior-1k-assets/scenes/Merom_0_int/json/Merom_0_int_no_interior_doors.json
+door_object_names:
+  - door_lvgliq_0
+  - door_lvgliq_1
+  - door_lvgliq_2
+  - door_lvgliq_3
+  - door_lvgliq_4
+doorless_portals:
+  - name: door_lvgliq_0
+    position: [1.230560302734375, 7.725292682647705]
+    radius_m: 0.72
+  - name: door_lvgliq_1
+    position: [2.195575475692749, 4.063839435577393]
+    radius_m: 0.68
+  - name: door_lvgliq_2
+    position: [2.859349012374878, 5.674045085906982]
+    radius_m: 0.72
+  - name: door_lvgliq_3
+    position: [0.7042829990386963, 8.71489143371582]
+    radius_m: 0.82
+  - name: door_lvgliq_4
+    position: [4.1243672370910645, 3.0857040882110596]
+    radius_m: 0.62
+
+ceiling_model_ids: [gatymy, kdovid, kqvkod, ssgfbx, uidjxd, wmhznm, zhzvbw]

@@ -342,6 +342,7 @@ class SmartHomeSensorRig:
         motion_sensors=None,
         show_motion_fov=False,
         pressure_position=(0.0, 0.0, 0.015),
+        pressure_name="pressure_sensor_0",
         pressure_size=(0.9, 0.9, 0.03),
         pressure_threshold_kg=20.0,
         show_pressure_visual=True,
@@ -371,7 +372,7 @@ class SmartHomeSensorRig:
         ]
         self.motion_fov_visible = bool(show_motion_fov)
         self.pressure_sensor = PressureSensor(
-            name="pressure_sensor_0",
+            name=pressure_name,
             position=pressure_position,
             size=pressure_size,
             threshold_kg=pressure_threshold_kg,

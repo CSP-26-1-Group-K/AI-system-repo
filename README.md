@@ -1,6 +1,6 @@
 # CSP-2026-K AI System Repository
 
-This repository tracks the shareable documents and HomeSense prototype code snapshot for Team K's smart-home robot subscription service validation project.
+This repository tracks the shareable documents and HomeSense prototype code snapshot for Team K's smart-home robot / digital-twin data generation project.
 
 ## Contents
 
@@ -11,10 +11,11 @@ This repository tracks the shareable documents and HomeSense prototype code snap
   - sensor placement notes
   - latest presentation PDF
 - `homesense-demo/`
-  - HomeSense live demo code copied from the local BEHAVIOR-1K working tree
-  - FastAPI live server
+  - HomeSense live demo code snapshot copied from the local BEHAVIOR-1K working tree
+  - OmniGibson viewport-first demo runner
+  - optional FastAPI live server
   - smart-home sensor logic
-  - Electron client
+  - legacy Electron client
   - compatibility runner files
 
 ## Not Included
@@ -33,13 +34,12 @@ Large assets and scene subsets must be shared separately.
 
 ## Current Prototype Summary
 
-The current prototype runs OmniGibson / Isaac Sim on a server machine and exposes a FastAPI live gateway. The Electron client connects to the server URL, displays the MJPEG camera stream, receives state updates over WebSocket, and sends command requests over HTTP.
+The current prototype focuses on an OmniGibson / Isaac Sim viewport demo using the `Merom_0_int` digital twin. It supports resident movement, scene camera switching, sensor range visualization, scene-profile based resident randomization, and JSONL episode logging for future replay / policy training.
 
-Main communication channels:
+The Electron/Web path is preserved as a legacy optional monitoring path, but it is no longer the primary demo surface.
 
-- HTTP REST command API
-- WebSocket state stream
-- MJPEG camera stream
+Current source-of-truth document:
 
-See `docs/NETWORK_TECH_STACK_QA.md` for presentation Q&A notes.
+- `docs/PROJECT_PROGRESS_2026-05-30.md`
 
+See also `docs/NETWORK_TECH_STACK_QA.md` for presentation Q&A notes.

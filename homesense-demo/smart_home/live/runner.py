@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import queue
+import random
 import sys
 import threading
 from pathlib import Path
@@ -29,6 +30,7 @@ from examples.smart_home.run_sensor_demo import (
     _look_at_quat,
     _set_dummy_position,
 )
+from smart_home.activity import ActivitySensorSimulator, ActivityState
 from smart_home.live.server import bridge
 from smart_home.live.avatar import add_demo_human_avatar
 from smart_home.live.constants import (
@@ -38,35 +40,26 @@ from smart_home.live.constants import (
     HUMAN_COMMAND_LIMIT_M,
     HUMAN_MOVE_SPEED_MPS,
     VIEWPORT_CAMERA_KEYS,
-    VIEWPORT_MOVE_STEP_M,
+    VIEWPORT_INPUT_HOLD_S,
     VIEWPORT_ROTATION_STEP_DEG,
     HUMAN_RADIUS_M,
-    MEROM_DOORLESS_PORTALS,
-    MEROM_HUMAN_START_POS,
-    MEROM_DOOR_OBJECT_NAMES,
-    MEROM_MOTION_SENSORS,
     OBSTACLE_IGNORE_NAMES,
     OBSTACLE_MIN_HEIGHT_M,
     OBSTACLE_PATH_PREFIX,
 )
+from smart_home.episode_logging import EpisodeJsonlLogger, utc_now_iso
 from smart_home.live.media import rgb_obs_to_jpeg, zero_action_like
 from smart_home.replay import ReplayRegistry, ReplaySelectionError
+from smart_home.scene_profile import load_scene_profile
 from smart_home.sensors import SmartHomeSensorRig
 from smart_home.service_types import SmartHomeState, TaskCommand
 
 
-def doorless_scene_file_for(scene_model):
-    if scene_model != "Merom_0_int":
+def doorless_scene_file_for(repo_root, scene_profile):
+    if scene_profile is None or not scene_profile.doorless_scene_file:
         return None
-    return (
-        REPO_ROOT
-        / "datasets"
-        / "behavior-1k-assets"
-        / "scenes"
-        / scene_model
-        / "json"
-        / f"{scene_model}_no_interior_doors.json"
-    )
+    path = Path(scene_profile.doorless_scene_file)
+    return path if path.is_absolute() else repo_root / path
 
 
 class LiveControlledScene:
@@ -97,13 +90,58 @@ class LiveControlledScene:
         self.collision_obstacles = []
         self.sensor_ranges_visible = False
         self.viewport_camera_modes = ("overview", "resident", "robot")
+        self.viewport_input_active = False
+        self.viewport_input_expires_t = 0.0
+        self.viewport_input_vector = (0.0, 0.0, 0.0)
+        self.viewport_input_face_movement = True
+        self.scene_profile = None
+        self.pressure_sensor_name = "pressure_sensor_0"
+        self.rng = random.Random(args.episode_seed)
+        self.episode_logger = EpisodeJsonlLogger(REPO_ROOT / args.episode_log_dir, enabled=not args.disable_episode_logging)
+        self.episode_id = 0
+        self.episode_started_at = None
+        self.episode_seed = args.episode_seed
+        self.episode_zone = None
+        self.episode_metrics = self.empty_episode_metrics()
+        self.activity_simulator = ActivitySensorSimulator(enabled=False)
+        self.activity_state = ActivityState()
+        self.resident_context = {}
+        self.step_log_interval_s = 1.0 / max(float(args.step_log_hz), 0.001) if args.step_log_hz > 0 else None
+        self.last_step_log_t = 0.0
+        self.hud_window = None
+        self.hud_labels = {}
+        self.last_hud_update_t = 0.0
 
     def setup(self):
         preset = PRESETS[self.args.preset]
         scene_model = self.args.scene_model or preset["scene"]
+        self.scene_profile = load_scene_profile(REPO_ROOT, scene_model)
+        if self.scene_profile is None:
+            bridge.log(
+                "scene_profile_missing",
+                {
+                    "scene_model": scene_model,
+                    "reason": "using preset/default sensor fallback; add smart_home/configs/scenes/<scene>.yaml for full scene-specific behavior",
+                },
+            )
+        else:
+            bridge.log(
+                "scene_profile_loaded",
+                {
+                    "scene_model": scene_model,
+                    "zones": sorted(self.scene_profile.zones),
+                    "motion_sensors": len(self.scene_profile.motion_sensors),
+                    "activity_profiles": sum(len(profiles) for profiles in self.scene_profile.activity_profiles.values()),
+                    "doorless_portals": len(self.scene_profile.doorless_portals),
+                },
+            )
+        self.activity_simulator = ActivitySensorSimulator(
+            profiles=self.scene_profile.activity_profiles if self.scene_profile is not None else {},
+            enabled=self.args.enable_activity_sensors,
+        )
         gm.HEADLESS = False
         gm.USE_GPU_DYNAMICS = not self.args.cpu_dynamics
-        using_doorless_scene = bool(self.args.doorless_scene and scene_model == "Merom_0_int")
+        using_doorless_scene = bool(self.args.doorless_scene and self.scene_profile and self.scene_profile.doorless_scene_file)
         gm.ENABLE_FLATCACHE = self.args.flatcache if self.args.flatcache is not None else not using_doorless_scene
         gm.ENABLE_OBJECT_STATES = False
         gm.ENABLE_TRANSITION_RULES = False
@@ -120,7 +158,7 @@ class LiveControlledScene:
         if self.args.empty_scene:
             scene_cfg = {"type": "Scene"}
         else:
-            scene_file = doorless_scene_file_for(scene_model) if self.args.doorless_scene else None
+            scene_file = doorless_scene_file_for(REPO_ROOT, self.scene_profile) if self.args.doorless_scene else None
             scene_cfg = {
                 "type": "InteractiveTraversableScene",
                 "scene_model": scene_model,
@@ -154,8 +192,10 @@ class LiveControlledScene:
 
         self.env = og.Environment(configs=cfg)
         self.robot = self.env.robots[0] if self.env.robots else None
+        self.apply_robot_initial_pose()
         self.robot_rgb_sensor = self._find_robot_rgb_sensor()
         self.zero_action = zero_action_like(self.env.action_space.sample()) if self.env.action_space is not None else []
+        bridge.log("robot_initial_pose", self.current_robot_pose() or {"available": False})
 
         with og.sim.editing_usd():
             if self.args.clean_structure_materials and not self.args.empty_scene:
@@ -170,12 +210,12 @@ class LiveControlledScene:
                         "reason": "Door prim visibility edits can crash PhysX/Fabric; use the doorless scene JSON instead.",
                     },
                 )
-            if self.args.doorless_scene and scene_model == "Merom_0_int":
+            if self.args.doorless_scene and using_doorless_scene:
                 self.ensure_doorless_collision_groups()
             self.cache_scene_geometry()
             self.cache_ceiling_prims()
             self.cache_collision_obstacles()
-            human_start_pos = MEROM_HUMAN_START_POS if scene_model == "Merom_0_int" and not self.args.empty_scene else preset["dummy_pos"]
+            human_start_pos = self.human_start_position(preset)
             self.dummy_root, human_visual_asset = add_demo_human_avatar(
                 position=human_start_pos,
                 height=1.7,
@@ -200,11 +240,12 @@ class LiveControlledScene:
                 motion_yaw_deg=preset["motion_yaw_deg"],
                 motion_range_m=preset.get("motion_range", 2.5),
                 motion_fov_deg=preset.get("motion_fov_deg", 60.0),
-                motion_sensors=MEROM_MOTION_SENSORS if scene_model == "Merom_0_int" and not self.args.empty_scene else None,
+                motion_sensors=self.motion_sensor_specs(),
                 show_motion_fov=False,
-                pressure_position=preset["pressure_pos"],
-                pressure_size=(0.9, 0.9, 0.03),
-                pressure_threshold_kg=6.0,
+                pressure_position=self.pressure_sensor_position(preset),
+                pressure_name=self.pressure_sensor_name,
+                pressure_size=self.pressure_sensor_size(),
+                pressure_threshold_kg=self.pressure_sensor_threshold_kg(),
                 show_pressure_visual=False,
             )
             self.sensor_rig.set_motion_occluders(self.sensor_wall_occluders())
@@ -212,6 +253,64 @@ class LiveControlledScene:
         self.set_camera("overview")
         self.attach_bridge()
         self.configure_keyboard()
+        self.create_viewport_hud()
+        self.write_dataset_manifest(scene_model)
+        self.start_episode(zone=self.args.resident_zone, reason="startup", randomize=False)
+
+    def human_start_position(self, preset):
+        if self.args.empty_scene or self.scene_profile is None:
+            return preset["dummy_pos"]
+        return self.scene_profile.human_start_pos
+
+    def motion_sensor_specs(self):
+        if self.args.empty_scene or self.scene_profile is None or not self.scene_profile.motion_sensors:
+            return None
+        return [dict(spec) for spec in self.scene_profile.motion_sensors]
+
+    def pressure_sensor_position(self, preset):
+        sensor = None if self.scene_profile is None else self.scene_profile.primary_pressure_sensor
+        if sensor is not None:
+            self.pressure_sensor_name = str(sensor.get("name", "pressure_sensor_0"))
+        return sensor["position"] if sensor is not None else preset["pressure_pos"]
+
+    def pressure_sensor_size(self):
+        sensor = None if self.scene_profile is None else self.scene_profile.primary_pressure_sensor
+        return tuple(sensor.get("size", [0.9, 0.9, 0.03])) if sensor is not None else (0.9, 0.9, 0.03)
+
+    def pressure_sensor_threshold_kg(self):
+        sensor = None if self.scene_profile is None else self.scene_profile.primary_pressure_sensor
+        return float(sensor.get("threshold_kg", 6.0)) if sensor is not None else 6.0
+
+    def empty_episode_metrics(self):
+        return {
+            "min_robot_resident_distance_m": None,
+            "frame_count": 0,
+            "task_started": False,
+            "task_completed": False,
+            "task_blocked": False,
+            "last_task": None,
+            "last_replay_id": None,
+        }
+
+    def write_dataset_manifest(self, scene_model):
+        scene_file = doorless_scene_file_for(REPO_ROOT, self.scene_profile) if self.args.doorless_scene else None
+        self.episode_logger.write_manifest(
+            {
+                "schema_version": "homesense_episode_dataset_v1",
+                "scene_model": scene_model,
+                "scene_file": str(scene_file) if scene_file is not None else None,
+                "robot_type": self.args.robot_type,
+                "resident_zone_mode": self.args.resident_zone,
+                "episode_seed": self.episode_seed,
+                "activity_sensors_enabled": bool(self.args.enable_activity_sensors),
+                "step_log_hz": float(self.args.step_log_hz),
+                "files": {
+                    "events": "events.jsonl",
+                    "steps": "steps.jsonl",
+                    "manifest": "manifest.json",
+                },
+            }
+        )
 
 
     def _add_empty_scene_floor(self):
@@ -308,7 +407,8 @@ class LiveControlledScene:
         # do not accidentally edit OmniGraph / Fabric internals at runtime.
         changed_paths = []
         missing = []
-        for name in MEROM_DOOR_OBJECT_NAMES:
+        door_names = self.scene_profile.door_object_names if self.scene_profile is not None else ()
+        for name in door_names:
             prim = og.sim.stage.GetPrimAtPath(f"{OBSTACLE_PATH_PREFIX}{name}")
             if not prim or not prim.IsValid():
                 missing.append(name)
@@ -354,13 +454,16 @@ class LiveControlledScene:
         if self.args.empty_scene or self.args.preserve_ceiling:
             self.ceiling_prims = []
             return
+        ceiling_ids = set(CEILING_MODEL_IDS)
+        if self.scene_profile is not None and self.scene_profile.ceiling_model_ids:
+            ceiling_ids = set(self.scene_profile.ceiling_model_ids)
         candidates = []
         for prim in og.sim.stage.Traverse():
             if not prim.IsValid():
                 continue
             path = str(prim.GetPath()).lower()
             name = prim.GetName().lower()
-            if "ceiling" in path or "ceilings" in path or name in CEILING_MODEL_IDS:
+            if "ceiling" in path or "ceilings" in path or name in ceiling_ids:
                 candidates.append(prim)
         candidate_paths = {str(prim.GetPath()) for prim in candidates}
         self.ceiling_prims = [
@@ -452,6 +555,10 @@ class LiveControlledScene:
         self.command_queue.put(("reset_scene", ()))
         return {"event": "reset_queued"}
 
+    def queue_new_episode(self):
+        self.command_queue.put(("new_episode", ()))
+        return {"event": "new_episode_queued"}
+
     def queue_set_video_source(self, source):
         source = str(source)
         if source not in {"viewer", "robot"}:
@@ -482,6 +589,9 @@ class LiveControlledScene:
                 self.pending_robot_task = False
             elif command == "reset_scene":
                 result = self.reset_scene()
+                self.pending_robot_task = False
+            elif command == "new_episode":
+                result = self.start_episode(zone=self.args.resident_zone, reason="manual", randomize=True)
                 self.pending_robot_task = False
             elif command == "set_video_source":
                 self.video_source = args[0]
@@ -547,6 +657,9 @@ class LiveControlledScene:
         key = getattr(lazy.carb.input.KeyboardInput, "R", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, self.queue_reset_scene)
+        key = getattr(lazy.carb.input.KeyboardInput, "N", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_new_episode)
         key = getattr(lazy.carb.input.KeyboardInput, "T", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, lambda: self.queue_run_task("deliver_item"))
@@ -565,53 +678,154 @@ class LiveControlledScene:
             "  W/A/S/D or arrow keys: Move resident in overview; move relative to resident in resident follow\n"
             "  Q/E: Rotate resident in resident follow\n"
             "  F: Toggle motion sensor ranges\n"
+            "  N: Start a randomized data-collection episode\n"
             "  T/Y: Trigger deliver-item / laundry replay placeholder\n"
             "  R: Reset scene\n"
             "  Esc: Quit\n",
             flush=True,
         )
 
+    def create_viewport_hud(self):
+        if self.args.disable_viewport_hud:
+            return
+        try:
+            import omni.ui as ui
+        except Exception as exc:
+            bridge.log("viewport_hud_unavailable", {"reason": str(exc)})
+            return
+        self.hud_window = ui.Window("HomeSense Live Context", width=390, height=230, visible=True)
+        with self.hud_window.frame:
+            with ui.VStack(spacing=6, height=0):
+                ui.Label("HomeSense Digital Twin Context", height=24)
+                self.hud_labels["episode"] = ui.Label("Episode: --")
+                self.hud_labels["zone"] = ui.Label("Resident: --")
+                self.hud_labels["motion"] = ui.Label("Motion: --")
+                self.hud_labels["activity"] = ui.Label("Activity: --")
+                self.hud_labels["virtual"] = ui.Label("Virtual sensors: --")
+                self.hud_labels["task"] = ui.Label("Robot task: --")
+                self.hud_labels["logging"] = ui.Label("Dataset: --")
+
+    def update_viewport_hud(self, now):
+        if not self.hud_labels or now - self.last_hud_update_t < 0.25:
+            return
+        self.last_hud_update_t = now
+        virtual_items = [
+            f"{key}={value}"
+            for key, value in sorted(self.activity_state.virtual_sensors.items())
+        ]
+        virtual_summary = ", ".join(virtual_items[:4]) if virtual_items else "--"
+        if len(virtual_items) > 4:
+            virtual_summary += f", +{len(virtual_items) - 4}"
+        context = self.resident_context or {}
+        confidence = context.get("confidence")
+        confidence_text = f"{float(confidence):.2f}" if confidence is not None else "--"
+        dataset_dir = str(self.episode_logger.run_dir) if self.episode_logger.run_dir else "disabled"
+        values = {
+            "episode": f"Episode: {self.episode_id} / zone={self.episode_zone}",
+            "zone": f"Resident: {self.state.human.zone} pos={self._short_vec(self.state.human.position)}",
+            "motion": f"Motion: {self.state.motion.active_sensor_id or '--'} detected={self.state.motion.detected}",
+            "activity": f"Activity: {self.activity_state.activity_id or '--'} confidence={confidence_text}",
+            "virtual": f"Virtual sensors: {virtual_summary}",
+            "task": f"Robot task: {self.state.robot.task or '--'} status={self.state.robot.status}",
+            "logging": f"Dataset: {dataset_dir}",
+        }
+        for key, text in values.items():
+            label = self.hud_labels.get(key)
+            if label is not None:
+                label.text = text
+
+    def _short_vec(self, values):
+        try:
+            return "[" + ", ".join(f"{float(value):.2f}" for value in values[:3]) + "]"
+        except Exception:
+            return "--"
+
     def queue_viewport_move(self, key_name):
-        dx, dy, face_movement = self.viewport_move_delta(key_name)
+        dx, dy, face_movement = self.viewport_move_input(key_name)
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            self.clear_viewport_input()
             return {"event": "viewport_move_ignored", "camera_mode": self.state.camera_mode, "key": key_name}
-        return self.queue_move_human_delta(dx, dy, 0.0, face_movement=face_movement)
+        self.viewport_input_active = True
+        self.viewport_input_expires_t = time() + VIEWPORT_INPUT_HOLD_S
+        self.viewport_input_vector = (dx, dy, 0.0)
+        self.viewport_input_face_movement = bool(face_movement)
+        self.apply_viewport_input()
+        return {
+            "event": "viewport_input",
+            "key": key_name,
+            "dx": dx,
+            "dy": dy,
+            "face_movement": bool(face_movement),
+        }
+
+    def clear_viewport_input(self):
+        if not self.viewport_input_active:
+            return
+        self.viewport_input_active = False
+        self.viewport_input_vector = (0.0, 0.0, 0.0)
+        self.human_input_vector = (0.0, 0.0, 0.0)
+        if self.dummy_root is not None:
+            self.human_target_pos = _get_dummy_position(self.dummy_root).tolist()
+
+    def sync_viewport_input(self, now):
+        if not self.viewport_input_active:
+            return
+        if self.state.robot.busy or now > self.viewport_input_expires_t:
+            self.clear_viewport_input()
+            return
+        self.apply_viewport_input()
+
+    def apply_viewport_input(self):
+        vector = th.tensor(self.viewport_input_vector, dtype=th.float32)
+        length = float(th.norm(vector))
+        if length < 1e-5:
+            self.clear_viewport_input()
+            return
+        normalized = (vector / length).tolist()
+        self.human_input_vector = tuple(float(v) for v in normalized)
+        self.human_target_pos = _get_dummy_position(self.dummy_root).tolist()
+        if self.viewport_input_face_movement:
+            self.human_heading_deg = self.heading_from_world_vector(
+                self.human_input_vector[0],
+                self.human_input_vector[1],
+            )
 
     def queue_viewport_rotate(self, delta_deg):
         if self.state.camera_mode != "resident":
             return {"event": "viewport_rotate_ignored", "camera_mode": self.state.camera_mode}
+        self.clear_viewport_input()
         return self.queue_rotate_human_heading(delta_deg)
 
-    def viewport_move_delta(self, key_name):
+    def viewport_move_input(self, key_name):
         mode = self.state.camera_mode
         key_name = str(key_name).upper()
         key_alias = {"UP": "W", "LEFT": "A", "DOWN": "S", "RIGHT": "D"}.get(key_name, key_name)
-        step = VIEWPORT_MOVE_STEP_M
         if mode == "resident":
             heading = math.radians(self.human_heading_deg)
             forward = [-math.sin(heading), math.cos(heading)]
             right = [math.cos(heading), math.sin(heading)]
             if key_alias == "W":
-                return forward[0] * step, forward[1] * step, False
+                return forward[0], forward[1], False
             if key_alias == "S":
-                return -forward[0] * step, -forward[1] * step, False
+                return -forward[0], -forward[1], False
             if key_alias == "A":
-                return -right[0] * step, -right[1] * step, False
+                return -right[0], -right[1], False
             if key_alias == "D":
-                return right[0] * step, right[1] * step, False
+                return right[0], right[1], False
             return 0.0, 0.0, False
         if mode == "overview":
             if key_alias == "W":
-                return step, 0.0, True
+                return 1.0, 0.0, True
             if key_alias == "S":
-                return -step, 0.0, True
+                return -1.0, 0.0, True
             if key_alias == "A":
-                return 0.0, step, True
+                return 0.0, 1.0, True
             if key_alias == "D":
-                return 0.0, -step, True
+                return 0.0, -1.0, True
         return 0.0, 0.0, False
 
     def queue_cycle_viewport_camera(self):
+        self.clear_viewport_input()
         try:
             idx = self.viewport_camera_modes.index(self.state.camera_mode)
         except ValueError:
@@ -710,13 +924,12 @@ class LiveControlledScene:
         return None
 
     def _is_doorless_portal_wall_clearance(self, position, obstacle_path):
-        scene_model = self.args.scene_model or PRESETS[self.args.preset]["scene"]
-        if not (self.args.doorless_scene and scene_model == "Merom_0_int"):
+        if not (self.args.doorless_scene and self.scene_profile is not None and self.scene_profile.doorless_portals):
             return False
         if "wall" not in obstacle_path.lower():
             return False
         x, y = float(position[0]), float(position[1])
-        for portal in MEROM_DOORLESS_PORTALS:
+        for portal in self.scene_profile.doorless_portals:
             px, py = portal["position"]
             radius = float(portal["radius_m"])
             if (x - px) ** 2 + (y - py) ** 2 <= radius**2:
@@ -747,6 +960,203 @@ class LiveControlledScene:
             return preferred
         bridge.log("human_spawn_adjusted", {"preferred": preferred, "position": best, "distance_m": math.sqrt(best_dist)})
         return best
+
+    def choose_episode_zone(self, requested_zone):
+        if self.scene_profile is None or not self.scene_profile.zones:
+            return None
+        zone_names = list(self.scene_profile.zones)
+        if requested_zone and requested_zone != "random":
+            if requested_zone not in self.scene_profile.zones:
+                bridge.log(
+                    "episode_zone_fallback",
+                    {"requested_zone": requested_zone, "available_zones": zone_names, "fallback": "random"},
+                )
+            else:
+                return requested_zone
+        return self.rng.choice(zone_names)
+
+    def sample_resident_position_for_zone(self, zone_name):
+        if self.scene_profile is None or zone_name not in self.scene_profile.zones:
+            return self.human_start_position(PRESETS[self.args.preset])
+        zone = self.scene_profile.zones[zone_name]
+        center = zone.get("center")
+        if not center:
+            return self.human_start_position(PRESETS[self.args.preset])
+        spawn_points = zone.get("spawn_points") or []
+        if spawn_points:
+            shuffled = [list(point) for point in spawn_points]
+            self.rng.shuffle(shuffled)
+            for point in shuffled:
+                base = [float(point[0]), float(point[1]), float(point[2]) if len(point) > 2 else 0.0]
+                radius = float(zone.get("spawn_radius_m", 0.0))
+                candidates = [base]
+                if radius > 1e-4:
+                    for _ in range(12):
+                        angle = self.rng.uniform(0.0, math.tau)
+                        distance = radius * math.sqrt(self.rng.random())
+                        candidates.append([
+                            base[0] + math.cos(angle) * distance,
+                            base[1] + math.sin(angle) * distance,
+                            base[2],
+                        ])
+                for candidate in candidates:
+                    if self._movement_blocker(candidate) is None:
+                        return candidate
+            bridge.log("episode_spawn_points_blocked", {"zone": zone_name, "spawn_points": spawn_points})
+        radius = float(zone.get("spawn_radius_m", 0.5))
+        z = float(center[2]) if len(center) > 2 else float(self.human_start_position(PRESETS[self.args.preset])[2])
+        fallback = [float(center[0]), float(center[1]), z]
+        for _ in range(64):
+            angle = self.rng.uniform(0.0, math.tau)
+            distance = radius * math.sqrt(self.rng.random())
+            candidate = [
+                float(center[0]) + math.cos(angle) * distance,
+                float(center[1]) + math.sin(angle) * distance,
+                z,
+            ]
+            if self._movement_blocker(candidate) is None:
+                return candidate
+        return self.find_nearest_free_position(fallback)
+
+    def current_robot_position(self):
+        if self.robot is None:
+            return None
+        try:
+            position, _ = self.robot.get_position_orientation()
+            return [float(v) for v in position.tolist()]
+        except Exception:
+            return None
+
+    def apply_robot_initial_pose(self):
+        if self.robot is None or self.scene_profile is None:
+            return
+        spec = self.scene_profile.robot or {}
+        if not spec:
+            return
+        position = spec.get("start_position")
+        if position is None:
+            return
+        yaw_deg = float(spec.get("start_yaw_deg", 0.0))
+        orientation = spec.get("start_orientation_xyzw")
+        if orientation is None:
+            orientation_tensor = T.euler2quat(th.tensor([0.0, 0.0, math.radians(yaw_deg)], dtype=th.float32))
+        else:
+            orientation_tensor = th.tensor([float(v) for v in orientation], dtype=th.float32)
+        position_tensor = th.tensor([float(v) for v in position], dtype=th.float32)
+        try:
+            self.robot.set_position_orientation(position=position_tensor, orientation=orientation_tensor)
+            bridge.log(
+                "robot_configured_initial_pose",
+                {
+                    "position": [float(v) for v in position_tensor.tolist()],
+                    "yaw_deg": yaw_deg,
+                    "orientation_xyzw": [float(v) for v in orientation_tensor.tolist()],
+                    "forward_axis": spec.get("forward_axis", "+X"),
+                    "source": "scene_profile.robot",
+                },
+            )
+        except Exception as exc:
+            bridge.log("robot_initial_pose_failed", {"reason": str(exc), "source": "scene_profile.robot"})
+
+    def current_robot_pose(self):
+        if self.robot is None:
+            return None
+        try:
+            position, quat = self.robot.get_position_orientation()
+            euler = T.quat2euler(quat)
+            yaw_rad = float(euler[2])
+            yaw_deg = math.degrees(yaw_rad)
+            forward = T.quat_apply(quat, th.tensor([1.0, 0.0, 0.0], dtype=th.float32))
+            return {
+                "position": [float(v) for v in position.tolist()],
+                "orientation_xyzw": [float(v) for v in quat.tolist()],
+                "euler_rpy_rad": [float(v) for v in euler.tolist()],
+                "yaw_deg": yaw_deg,
+                "forward_xy": [float(forward[0]), float(forward[1])],
+            }
+        except Exception as exc:
+            return {"available": False, "reason": str(exc)}
+
+    def current_robot_resident_distance(self):
+        robot_pos = self.current_robot_position()
+        if robot_pos is None or self.dummy_root is None:
+            return None
+        human_pos = _get_dummy_position(self.dummy_root).tolist()
+        return math.sqrt((robot_pos[0] - human_pos[0]) ** 2 + (robot_pos[1] - human_pos[1]) ** 2)
+
+    def update_episode_metrics(self):
+        self.episode_metrics["frame_count"] += 1
+        distance = self.current_robot_resident_distance()
+        if distance is None:
+            return
+        previous = self.episode_metrics["min_robot_resident_distance_m"]
+        if previous is None or distance < float(previous):
+            self.episode_metrics["min_robot_resident_distance_m"] = distance
+
+    def episode_payload(self, event_reason=None):
+        data = self.snapshot()
+        return {
+            "episode_id": self.episode_id,
+            "episode_seed": self.episode_seed,
+            "scene_model": self.scene_profile.scene_model if self.scene_profile else (self.args.scene_model or PRESETS[self.args.preset]["scene"]),
+            "resident_zone_requested": self.args.resident_zone,
+            "resident_zone_sampled": self.episode_zone,
+            "started_at": self.episode_started_at,
+            "reason": event_reason,
+            "task": data.get("robot", {}).get("task"),
+            "robot_status": data.get("robot", {}).get("status"),
+            "resident": data.get("human"),
+            "motion": data.get("motion"),
+            "pressure": data.get("pressure"),
+            "activity_context": data.get("activity_context"),
+            "robot_context": data.get("robot", {}).get("context"),
+            "metrics": dict(self.episode_metrics),
+        }
+
+    def finish_episode(self, reason):
+        if self.episode_id <= 0:
+            return
+        self.episode_logger.write("episode_end", self.episode_payload(event_reason=reason))
+
+    def start_episode(self, zone="random", reason="manual", randomize=True):
+        if self.state.robot.busy:
+            return {"event": "new_episode_blocked", "reason": "robot task is running"}
+        if self.episode_id > 0:
+            self.finish_episode(reason=f"superseded_by_{reason}")
+        self.clear_viewport_input()
+        self.human_input_vector = (0.0, 0.0, 0.0)
+        self.state.robot.status = "idle"
+        self.state.robot.task = None
+        self.state.robot.replay_id = None
+        self.robot_task_end_t = None
+        self.episode_id += 1
+        self.episode_started_at = utc_now_iso()
+        self.episode_metrics = self.empty_episode_metrics()
+        if randomize:
+            self.episode_zone = self.choose_episode_zone(zone)
+            resident_pos = self.sample_resident_position_for_zone(self.episode_zone)
+        else:
+            self.episode_zone = "configured_start"
+            resident_pos = self.human_start_position(PRESETS[self.args.preset])
+        self.human_target_pos = self.find_nearest_free_position(resident_pos)
+        self.human_heading_deg = 0.0
+        self._set_human_pose(self.human_target_pos, self.human_heading_deg)
+        self.activity_state = self.activity_simulator.start_episode(self.episode_zone, self.rng)
+        self.set_camera("overview")
+        self.read_sensors()
+        payload = self.episode_payload(event_reason=reason)
+        payload["sampled_position"] = self.human_target_pos
+        self.episode_logger.write("episode_start", payload)
+        bridge.log(
+            "episode_started",
+            {
+                "episode_id": self.episode_id,
+                "zone": self.episode_zone,
+                "position": self.human_target_pos,
+                "log_path": str(self.episode_logger.path) if self.episode_logger.path else None,
+            },
+        )
+        return {"event": "episode_started", "episode_id": self.episode_id, "zone": self.episode_zone, "position": self.human_target_pos}
 
     def update_human_motion(self):
         now = time()
@@ -818,11 +1228,16 @@ class LiveControlledScene:
             position = [human[0] - forward[0] * 1.7, human[1] - forward[1] * 1.7, human[2] + 1.45]
             look_at = [human[0], human[1], human[2] + 1.1]
         elif mode == "overview" and self.scene_bounds is not None:
-            center = self.scene_bounds["center"]
-            size = self.scene_bounds["size"]
-            height = max(10.0, min(18.0, max(size[0], size[1]) * 1.32))
-            position = [center[0], center[1], height]
-            look_at = [center[0], center[1], 0.0]
+            overview = self.scene_profile.overview_camera if self.scene_profile is not None else None
+            if overview and not overview.get("auto_from_scene_bounds", False):
+                position = overview["position"]
+                look_at = overview["look_at"]
+            else:
+                center = self.scene_bounds["center"]
+                size = self.scene_bounds["size"]
+                height = max(10.0, min(18.0, max(size[0], size[1]) * 1.32))
+                position = [center[0], center[1], height]
+                look_at = [center[0], center[1], 0.0]
         elif mode == "robot" and self.robot is not None:
             try:
                 robot_pos_tensor, robot_quat = self.robot.get_position_orientation()
@@ -875,6 +1290,7 @@ class LiveControlledScene:
     def run_task(self, task):
         if self.state.robot.busy:
             return {"event": "task_blocked", "task": task, "reason": "robot already busy"}
+        self.clear_viewport_input()
         self.human_input_vector = (0.0, 0.0, 0.0)
         self.human_target_pos = _get_dummy_position(self.dummy_root).tolist()
         try:
@@ -883,17 +1299,26 @@ class LiveControlledScene:
             self.state.robot.status = "blocked"
             self.state.robot.task = task
             self.state.robot.replay_id = None
+            self.episode_metrics["task_blocked"] = True
+            self.episode_metrics["last_task"] = task
+            self.episode_logger.write("task_blocked", self.episode_payload(event_reason=str(exc)))
             return {"event": "task_blocked", "task": task, "reason": str(exc)}
         self.state.robot.status = "running_replay"
         self.state.robot.task = task
         self.state.robot.replay_id = replay.replay_id
+        self.episode_metrics["task_started"] = True
+        self.episode_metrics["last_task"] = task
+        self.episode_metrics["last_replay_id"] = replay.replay_id
         self.robot_task_end_t = time() + self.args.task_duration_s
+        self.episode_logger.write("task_started", self.episode_payload(event_reason="replay_started"))
         return {"event": "replay_started", "task": task, "replay_id": replay.replay_id, "context": self.state.robot.context}
 
     def reset_scene(self):
+        if self.args.randomize_resident_on_reset:
+            return self.start_episode(zone=self.args.resident_zone, reason="reset", randomize=True)
         preset = PRESETS[self.args.preset]
-        scene_model = self.args.scene_model or preset["scene"]
-        human_start_pos = MEROM_HUMAN_START_POS if scene_model == "Merom_0_int" and not self.args.empty_scene else preset["dummy_pos"]
+        human_start_pos = self.human_start_position(preset)
+        self.clear_viewport_input()
         self.human_input_vector = (0.0, 0.0, 0.0)
         self.human_target_pos = self.find_nearest_free_position(human_start_pos)
         self.human_heading_deg = 0.0
@@ -910,6 +1335,8 @@ class LiveControlledScene:
         if self.robot_task_end_t is not None and time() >= self.robot_task_end_t:
             self.state.robot.status = "completed"
             self.robot_task_end_t = None
+            self.episode_metrics["task_completed"] = True
+            self.episode_logger.write("task_completed", self.episode_payload(event_reason="task_duration_elapsed"))
 
     def update_heavy_load(self, sim_t):
         return
@@ -931,7 +1358,7 @@ class LiveControlledScene:
             )
         else:
             active_sensor_id, motion = next(iter(motion_readings.items()))
-        pressure = self.current_readings["pressure_sensors"]["pressure_sensor_0"]
+        pressure = self.current_readings["pressure_sensors"][self.pressure_sensor_name]
         detected = bool(motion["detected"])
         active_zone = motion.get("zone") if detected else None
         self.state.human.position = dummy_pos
@@ -944,7 +1371,16 @@ class LiveControlledScene:
             sensor_id=active_sensor_id,
         )
         self.state.pressure.weight_kg = float(pressure.get("estimated_weight_kg", 0.0))
+        virtual_weight_kg = self.activity_state.virtual_sensors.get("laundry_weight_kg")
+        if virtual_weight_kg is not None:
+            self.state.pressure.weight_kg = float(virtual_weight_kg)
         self.state.pressure.threshold_kg = 6.0
+        self.resident_context = self.activity_simulator.estimate_context(
+            self.activity_state,
+            motion_zone=active_zone,
+            motion_detected=detected,
+            last_known_zone=self.state.motion.last_known_zone,
+        )
         self.state.robot.context = {
             "resident_zone": self.state.human.zone,
             "last_known_resident_zone": self.state.motion.last_known_zone,
@@ -952,6 +1388,9 @@ class LiveControlledScene:
             "active_motion_sensor": self.state.motion.active_sensor_id,
             "pressure_triggered": self.state.pressure.triggered,
             "laundry_weight_kg": self.state.pressure.weight_kg,
+            "resident_context": self.resident_context,
+            "activity_id": self.activity_state.activity_id,
+            "virtual_sensors": dict(self.activity_state.virtual_sensors),
         }
 
     def snapshot(self):
@@ -965,23 +1404,60 @@ class LiveControlledScene:
         data["sensor_visualization"] = {
             "motion_ranges_visible": bool(self.sensor_ranges_visible),
         }
+        data["activity_context"] = {
+            "enabled": bool(self.activity_state.enabled),
+            "activity_id": self.activity_state.activity_id,
+            "ground_truth_zone": self.activity_state.ground_truth_zone,
+            "virtual_sensors": dict(self.activity_state.virtual_sensors),
+            "resident_context": dict(self.resident_context),
+        }
+        data["robot_pose"] = self.current_robot_pose()
         return data
+
+    def log_step(self, now, sim_t, frame):
+        if self.step_log_interval_s is None or self.episode_id <= 0:
+            return
+        if now - self.last_step_log_t < self.step_log_interval_s:
+            return
+        self.last_step_log_t = now
+        data = self.snapshot()
+        self.episode_logger.write_step(
+            {
+                "episode_id": self.episode_id,
+                "episode_seed": self.episode_seed,
+                "episode_zone": self.episode_zone,
+                "frame": int(frame),
+                "sim_time_s": float(sim_t),
+                "wall_time_s": float(now),
+                "human": data.get("human"),
+                "motion": data.get("motion"),
+                "pressure": data.get("pressure"),
+                "robot": data.get("robot"),
+                "camera_mode": data.get("camera_mode"),
+                "activity_context": data.get("activity_context"),
+                "metrics": dict(self.episode_metrics),
+            }
+        )
 
     def run(self):
         frame = 0
         while True:
             sim_t = frame * og.sim.get_sim_step_dt()
             self.process_commands()
+            now = time()
+            self.sync_viewport_input(now)
             self.update_human_motion()
             self.update_heavy_load(sim_t)
             self.read_sensors()
+            self.update_episode_metrics()
             self.update_task()
+            self.log_step(now, sim_t, frame)
             if frame > 2 and self.ceiling_visibility_dirty:
                 visibility_result = self.sync_ceiling_visibility_for_view()
                 if visibility_result["event"] == "ceiling_visibility":
                     bridge.log(visibility_result["event"], visibility_result)
-            now = time()
             self.update_follow_camera(now)
+            self.update_viewport_hud(now)
             self.capture_video_frame(now)
             frame += 1
             self.env.step(action=self.zero_action)
@@ -1010,6 +1486,39 @@ def main():
     parser.add_argument("--clean-structure-materials", action="store_true", default=True)
     parser.add_argument("--task-duration-s", type=float, default=6.0)
     parser.add_argument("--video-fps", type=float, default=10.0)
+    parser.add_argument("--episode-seed", type=int, default=20260530, help="Seed for reproducible episode resident randomization.")
+    parser.add_argument(
+        "--resident-zone",
+        default="random",
+        help="Resident spawn zone for new episodes. Use 'random' to sample from the current scene profile zones.",
+    )
+    parser.add_argument(
+        "--episode-log-dir",
+        default="logs/homesense_episodes",
+        help="Directory, relative to the BEHAVIOR-1K root unless absolute, for JSONL episode logs.",
+    )
+    parser.add_argument("--disable-episode-logging", action="store_true", help="Disable JSONL episode logging.")
+    parser.add_argument(
+        "--enable-activity-sensors",
+        action="store_true",
+        help="Enable scene-profile virtual activity sensors for data-generation episodes.",
+    )
+    parser.add_argument(
+        "--step-log-hz",
+        type=float,
+        default=2.0,
+        help="Write compact step-level episode data at this frequency. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--disable-viewport-hud",
+        action="store_true",
+        help="Hide the Omni UI context HUD in the simulator viewport.",
+    )
+    parser.add_argument(
+        "--randomize-resident-on-reset",
+        action="store_true",
+        help="Make R/reset start a randomized episode instead of returning to the configured resident start pose.",
+    )
     parser.add_argument("--robot-type", choices=["R1", "R1Pro"], default="R1Pro")
     parser.add_argument("--cpu-dynamics", action="store_true", help="Use CPU dynamics instead of GPU dynamics for heavier full-scene demos.")
     parser.add_argument(

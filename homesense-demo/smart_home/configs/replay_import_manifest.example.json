@@ -1,0 +1,37 @@
+{
+  "scene_model": "Merom_0_int",
+  "robot_model": "Galaxea_R1",
+  "notes": "Example manifest for collaborator-provided replay files. Paths are relative to this manifest file unless absolute.",
+  "replays": [
+    {
+      "replay_id": "deliver_item_living_room_001",
+      "task": "deliver_item",
+      "path": "replays/deliver_item_living_room_001",
+      "trigger": {
+        "resident_zone": "living_room"
+      },
+      "initial_state": "merom_default",
+      "final_state": "delivered_to_living_room",
+      "duration_s": 18.0,
+      "metadata": {
+        "operator": "collaborator",
+        "collection_date": "YYYY-MM-DD"
+      }
+    },
+    {
+      "replay_id": "laundry_utility_room_001",
+      "task": "laundry",
+      "path": "replays/laundry_utility_room_001",
+      "trigger": {
+        "pressure_triggered": true
+      },
+      "initial_state": "merom_default",
+      "final_state": "laundry_loaded",
+      "duration_s": 24.0,
+      "metadata": {
+        "operator": "collaborator",
+        "collection_date": "YYYY-MM-DD"
+      }
+    }
+  ]
+}
