@@ -424,3 +424,30 @@ The recommended presentation story is:
 7. Show JSONL episode logs as generated training/evaluation data.
 
 The point is not to claim completed autonomous robot learning. The point is to show a credible foundation for **context-rich data generation, failure discovery, and future replay/policy training**.
+
+## 9. Dataset Quality Update
+
+The generated dataset now separates simulator truth from inferred smart-home context.
+
+Each step record includes:
+
+- `ground_truth`: resident zone/pose, activity id, virtual sensor values, robot pose
+- `estimates`: active sensor estimate, last-known zone, confidence, evidence
+- `sensor_quality`: motion dropout, zone mismatch, and fault labels
+- `risk`: robot-resident distance and risk level
+- `training_validity`: which downstream uses are valid at the current project stage
+- `scenario_type`: compact scenario label for dataset balancing
+
+Important limitation:
+
+- `policy_behavior_cloning` remains false until collaborator replay files provide action labels and controller metadata.
+- Current logs are valid for context modeling, task selection experiments, safety evaluation, and presentation of the data-generation loop.
+
+Dataset summary command:
+
+```bash
+/home/user/Desktop/isaac-sim-5.1/python.sh examples/smart_home/summarize_episode_dataset.py \
+  logs/homesense_episodes/run_<timestamp>
+```
+
+This produces counts and rates for zones, scenario types, activity labels, risk labels, motion detection, dropout, and training validity.

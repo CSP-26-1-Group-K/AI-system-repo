@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import queue
 import random
@@ -20,6 +21,8 @@ import omnigibson as og
 import omnigibson.lazy as lazy
 import omnigibson.utils.transform_utils as T
 from omnigibson.macros import gm
+from omnigibson.objects.dataset_object import DatasetObject
+from omnigibson.objects.primitive_object import PrimitiveObject
 from omnigibson.utils.constants import STRUCTURE_CATEGORIES
 from omnigibson.utils.ui_utils import KeyboardEventHandler
 
@@ -78,6 +81,8 @@ class LiveControlledScene:
         self.last_video_frame_t = 0.0
         self.follow_camera_interval_s = 0.10
         self.last_follow_camera_t = 0.0
+        self.default_viewer_camera_pose = None
+        self.viewer_camera_mover = None
         self.robot_rgb_sensor = None
         self.ceiling_prims = []
         self.ceiling_hidden = False
@@ -102,20 +107,28 @@ class LiveControlledScene:
         self.episode_started_at = None
         self.episode_seed = args.episode_seed
         self.episode_zone = None
+        self.episode_scenario_type = None
         self.episode_metrics = self.empty_episode_metrics()
         self.activity_simulator = ActivitySensorSimulator(enabled=False)
         self.activity_state = ActivityState()
+        self.human_posture = "standing"
         self.resident_context = {}
         self.step_log_interval_s = 1.0 / max(float(args.step_log_hz), 0.001) if args.step_log_hz > 0 else None
         self.last_step_log_t = 0.0
         self.hud_window = None
         self.hud_labels = {}
         self.last_hud_update_t = 0.0
+        self.hdf5_replay_actions = None
+        self.hdf5_replay_config = None
+        self.hdf5_replay_id = None
+        self.robot_replay_active = False
+        self.robot_replay_step = 0
 
     def setup(self):
         preset = PRESETS[self.args.preset]
         scene_model = self.args.scene_model or preset["scene"]
         self.scene_profile = load_scene_profile(REPO_ROOT, scene_model)
+        self.load_hdf5_replay()
         if self.scene_profile is None:
             bridge.log(
                 "scene_profile_missing",
@@ -173,18 +186,44 @@ class LiveControlledScene:
                     )
                 scene_cfg["scene_file"] = str(scene_file)
                 bridge.log("doorless_scene_file_selected", {"scene_model": scene_model, "scene_file": str(scene_file)})
+        robot_cfg = {
+            "type": self.args.robot_type,
+            "obs_modalities": ["rgb"],
+            "action_type": "continuous",
+            "action_normalize": True,
+            "scale": 1.0,
+            "self_collision": False,
+        }
+        if self.hdf5_replay_config is not None:
+            replay_robot_cfg = self.hdf5_replay_config.get("robot_config") or {}
+            robot_cfg["action_normalize"] = bool(replay_robot_cfg.get("action_normalize", robot_cfg["action_normalize"]))
+            if "controller_config" in replay_robot_cfg:
+                robot_cfg["controller_config"] = replay_robot_cfg["controller_config"]
+            if "reset_joint_pos" in replay_robot_cfg:
+                robot_cfg["reset_joint_pos"] = replay_robot_cfg["reset_joint_pos"]
+            if "grasping_mode" in replay_robot_cfg:
+                robot_cfg["grasping_mode"] = replay_robot_cfg["grasping_mode"]
+            if "sensor_config" in replay_robot_cfg:
+                robot_cfg["sensor_config"] = replay_robot_cfg["sensor_config"]
+            if "self_collisions" in replay_robot_cfg:
+                robot_cfg["self_collision"] = bool(replay_robot_cfg["self_collisions"])
+            if "position" in replay_robot_cfg:
+                robot_cfg["position"] = replay_robot_cfg["position"]
+            if "orientation" in replay_robot_cfg:
+                robot_cfg["orientation"] = replay_robot_cfg["orientation"]
+            bridge.log(
+                "hdf5_replay_robot_config_applied",
+                {
+                    "replay_id": self.hdf5_replay_id,
+                    "action_normalize": robot_cfg.get("action_normalize"),
+                    "controller_groups": sorted((robot_cfg.get("controller_config") or {}).keys()),
+                    "has_reset_joint_pos": "reset_joint_pos" in robot_cfg,
+                },
+            )
+
         cfg = {
             "scene": scene_cfg,
-            "robots": [
-                {
-                    "type": self.args.robot_type,
-                    "obs_modalities": ["rgb"],
-                    "action_type": "continuous",
-                    "action_normalize": True,
-                    "scale": 1.0,
-                    "self_collision": False,
-                }
-            ],
+            "robots": [robot_cfg],
             "task": {"type": "DummyTask"},
         }
         if self.args.full and not self.args.empty_scene:
@@ -192,7 +231,11 @@ class LiveControlledScene:
 
         self.env = og.Environment(configs=cfg)
         self.robot = self.env.robots[0] if self.env.robots else None
+        self.capture_default_viewer_camera_pose()
         self.apply_robot_initial_pose()
+        self.add_scene_profile_objects()
+        self.sync_hdf5_replay_object_poses("scene_initialization")
+        self.sync_hdf5_replay_robot_state("scene_initialization")
         self.robot_rgb_sensor = self._find_robot_rgb_sensor()
         self.zero_action = zero_action_like(self.env.action_space.sample()) if self.env.action_space is not None else []
         bridge.log("robot_initial_pose", self.current_robot_pose() or {"available": False})
@@ -251,6 +294,7 @@ class LiveControlledScene:
             self.sensor_rig.set_motion_occluders(self.sensor_wall_occluders())
             bridge.log("pressure_sensor_visual_disabled", {"reason": "avoid overlapping Merom laundry geometry"})
         self.set_camera("overview")
+        self.enable_default_viewer_camera_controls()
         self.attach_bridge()
         self.configure_keyboard()
         self.create_viewport_hud()
@@ -297,6 +341,7 @@ class LiveControlledScene:
         self.episode_logger.write_manifest(
             {
                 "schema_version": "homesense_episode_dataset_v1",
+                "quality_schema_version": "homesense_quality_v1",
                 "scene_model": scene_model,
                 "scene_file": str(scene_file) if scene_file is not None else None,
                 "robot_type": self.args.robot_type,
@@ -310,6 +355,63 @@ class LiveControlledScene:
                     "manifest": "manifest.json",
                 },
             }
+        )
+
+    def load_hdf5_replay(self):
+        if not self.args.hdf5_replay:
+            return
+        import h5py
+
+        replay_path = Path(self.args.hdf5_replay)
+        if not replay_path.is_absolute():
+            replay_path = REPO_ROOT / replay_path
+        if not replay_path.exists():
+            raise FileNotFoundError(f"HDF5 replay file does not exist: {replay_path}")
+        with h5py.File(replay_path, "r") as f:
+            data = f["data"]
+            demo_key = f"demo_{self.args.hdf5_replay_episode}"
+            if demo_key not in data:
+                raise ValueError(f"HDF5 replay has no {demo_key}; available demos: {sorted(k for k in data if k.startswith('demo_'))}")
+            config = json.loads(data.attrs["config"])
+            scene_file = json.loads(data.attrs["scene_file"])
+            demo = data[demo_key]
+            self.hdf5_replay_actions = th.tensor(demo["action"][:], dtype=th.float32)
+            self.hdf5_replay_config = {
+                "path": str(replay_path),
+                "demo_key": demo_key,
+                "scene_model": (config.get("scene") or {}).get("scene_model"),
+                "scene_file": (config.get("scene") or {}).get("scene_file"),
+                "robot_config": dict((config.get("robots") or [{}])[0]),
+                "scene_metadata": scene_file.get("metadata", {}),
+                "object_poses": {},
+                "object_states": {},
+                "robot_state": {},
+            }
+            object_registry = ((scene_file.get("state") or {}).get("registry") or {}).get("object_registry") or {}
+            for object_name in ("medicine_bottle_0",):
+                root_link = (object_registry.get(object_name) or {}).get("root_link") or {}
+                if root_link.get("pos") is not None and root_link.get("ori") is not None:
+                    self.hdf5_replay_config["object_poses"][object_name] = {
+                        "position": root_link["pos"],
+                        "orientation_xyzw": root_link["ori"],
+                    }
+                    self.hdf5_replay_config["object_states"][object_name] = dict(object_registry.get(object_name) or {})
+            robot_state = dict(object_registry.get("robot") or {})
+            root_link = robot_state.get("root_link") or {}
+            if root_link.get("pos") is not None and root_link.get("ori") is not None:
+                self.hdf5_replay_config["robot_state"] = robot_state
+        self.hdf5_replay_id = replay_path.stem
+        bridge.log(
+            "hdf5_replay_loaded",
+            {
+                "path": str(replay_path),
+                "demo_key": self.hdf5_replay_config["demo_key"],
+                "scene_model": self.hdf5_replay_config["scene_model"],
+                "num_actions": int(self.hdf5_replay_actions.shape[0]),
+                "action_dim": int(self.hdf5_replay_actions.shape[1]) if self.hdf5_replay_actions.ndim > 1 else None,
+                "action_normalize": self.hdf5_replay_config["robot_config"].get("action_normalize"),
+                "object_poses": self.hdf5_replay_config["object_poses"],
+            },
         )
 
 
@@ -519,12 +621,16 @@ class LiveControlledScene:
     def queue_move_human_delta(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy or self.pending_robot_task:
             return {"event": "move_human_blocked", "reason": "robot task is running"}
+        if not self.activity_state.movement_enabled:
+            return {"event": "move_human_blocked", "reason": f"resident posture is {self.activity_state.posture}"}
         self.command_queue.put(("move_human_delta", (float(dx), float(dy), float(dz), bool(face_movement))))
         return {"event": "move_human_queued", "dx": dx, "dy": dy, "dz": dz, "face_movement": bool(face_movement)}
 
     def queue_set_human_input(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy or self.pending_robot_task:
             return {"event": "set_human_input_blocked", "reason": "robot task is running"}
+        if not self.activity_state.movement_enabled:
+            return {"event": "set_human_input_blocked", "reason": f"resident posture is {self.activity_state.posture}"}
         self.command_queue.put(("set_human_input", (float(dx), float(dy), float(dz), bool(face_movement))))
         return {
             "event": "set_human_input_queued",
@@ -537,6 +643,8 @@ class LiveControlledScene:
     def queue_rotate_human_heading(self, delta_deg):
         if self.state.robot.busy or self.pending_robot_task:
             return {"event": "rotate_human_heading_blocked", "reason": "robot task is running"}
+        if not self.activity_state.movement_enabled:
+            return {"event": "rotate_human_heading_blocked", "reason": f"resident posture is {self.activity_state.posture}"}
         self.command_queue.put(("rotate_human_heading", (float(delta_deg),)))
         return {"event": "rotate_human_heading_queued", "delta_deg": delta_deg}
 
@@ -693,7 +801,22 @@ class LiveControlledScene:
         except Exception as exc:
             bridge.log("viewport_hud_unavailable", {"reason": str(exc)})
             return
-        self.hud_window = ui.Window("HomeSense Live Context", width=390, height=230, visible=True)
+        try:
+            self.hud_window = ui.Window(
+                "HomeSense Live Context",
+                width=360,
+                height=210,
+                position_x=1030,
+                position_y=520,
+                visible=True,
+            )
+        except TypeError:
+            self.hud_window = ui.Window("HomeSense Live Context", width=360, height=210, visible=True)
+        for attr, value in {"position_x": 1030, "position_y": 520}.items():
+            try:
+                setattr(self.hud_window, attr, value)
+            except Exception:
+                pass
         with self.hud_window.frame:
             with ui.VStack(spacing=6, height=0):
                 ui.Label("HomeSense Digital Twin Context", height=24)
@@ -741,6 +864,9 @@ class LiveControlledScene:
             return "--"
 
     def queue_viewport_move(self, key_name):
+        if not self.activity_state.movement_enabled:
+            self.clear_viewport_input()
+            return {"event": "viewport_move_blocked", "reason": f"resident posture is {self.activity_state.posture}"}
         dx, dy, face_movement = self.viewport_move_input(key_name)
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
             self.clear_viewport_input()
@@ -770,7 +896,7 @@ class LiveControlledScene:
     def sync_viewport_input(self, now):
         if not self.viewport_input_active:
             return
-        if self.state.robot.busy or now > self.viewport_input_expires_t:
+        if self.state.robot.busy or not self.activity_state.movement_enabled or now > self.viewport_input_expires_t:
             self.clear_viewport_input()
             return
         self.apply_viewport_input()
@@ -923,6 +1049,17 @@ class LiveControlledScene:
                 return obstacle["path"]
         return None
 
+    def _inside_scene_bounds(self, position, margin=0.0):
+        if self.scene_bounds is None:
+            return True
+        x, y, _ = position
+        min_pt = self.scene_bounds["min"]
+        max_pt = self.scene_bounds["max"]
+        return (
+            min_pt[0] - margin <= x <= max_pt[0] + margin
+            and min_pt[1] - margin <= y <= max_pt[1] + margin
+        )
+
     def _is_doorless_portal_wall_clearance(self, position, obstacle_path):
         if not (self.args.doorless_scene and self.scene_profile is not None and self.scene_profile.doorless_portals):
             return False
@@ -938,7 +1075,7 @@ class LiveControlledScene:
 
     def find_nearest_free_position(self, preferred):
         preferred = [float(preferred[0]), float(preferred[1]), float(preferred[2])]
-        if self._movement_blocker(preferred) is None:
+        if self._inside_scene_bounds(preferred) and self._movement_blocker(preferred) is None:
             return preferred
         step = 0.18
         max_steps = 16
@@ -949,6 +1086,8 @@ class LiveControlledScene:
                 if ix == 0 and iy == 0:
                     continue
                 candidate = [preferred[0] + ix * step, preferred[1] + iy * step, preferred[2]]
+                if not self._inside_scene_bounds(candidate):
+                    continue
                 if self._movement_blocker(candidate) is not None:
                     continue
                 dist = (candidate[0] - preferred[0]) ** 2 + (candidate[1] - preferred[1]) ** 2
@@ -975,19 +1114,21 @@ class LiveControlledScene:
                 return requested_zone
         return self.rng.choice(zone_names)
 
-    def sample_resident_position_for_zone(self, zone_name):
+    def sample_resident_position_for_zone(self, zone_name, activity_spawn_points=None, collision_check=True):
         if self.scene_profile is None or zone_name not in self.scene_profile.zones:
             return self.human_start_position(PRESETS[self.args.preset])
         zone = self.scene_profile.zones[zone_name]
         center = zone.get("center")
         if not center:
             return self.human_start_position(PRESETS[self.args.preset])
-        spawn_points = zone.get("spawn_points") or []
+        spawn_points = activity_spawn_points or zone.get("spawn_points") or []
         if spawn_points:
             shuffled = [list(point) for point in spawn_points]
             self.rng.shuffle(shuffled)
             for point in shuffled:
                 base = [float(point[0]), float(point[1]), float(point[2]) if len(point) > 2 else 0.0]
+                if not collision_check and self._inside_scene_bounds(base):
+                    return base
                 radius = float(zone.get("spawn_radius_m", 0.0))
                 candidates = [base]
                 if radius > 1e-4:
@@ -1000,7 +1141,9 @@ class LiveControlledScene:
                             base[2],
                         ])
                 for candidate in candidates:
-                    if self._movement_blocker(candidate) is None:
+                    if self._inside_scene_bounds(candidate) and (
+                        not collision_check or self._movement_blocker(candidate) is None
+                    ):
                         return candidate
             bridge.log("episode_spawn_points_blocked", {"zone": zone_name, "spawn_points": spawn_points})
         radius = float(zone.get("spawn_radius_m", 0.5))
@@ -1014,7 +1157,9 @@ class LiveControlledScene:
                 float(center[1]) + math.sin(angle) * distance,
                 z,
             ]
-            if self._movement_blocker(candidate) is None:
+            if self._inside_scene_bounds(candidate) and (
+                not collision_check or self._movement_blocker(candidate) is None
+            ):
                 return candidate
         return self.find_nearest_free_position(fallback)
 
@@ -1058,6 +1203,165 @@ class LiveControlledScene:
         except Exception as exc:
             bridge.log("robot_initial_pose_failed", {"reason": str(exc), "source": "scene_profile.robot"})
 
+    def add_scene_profile_objects(self):
+        if self.scene_profile is None or not self.scene_profile.demo_objects:
+            return
+        object_names = set(getattr(self.env.scene.object_registry, "object_names", []))
+        for spec in self.scene_profile.demo_objects:
+            spec = dict(spec)
+            name = str(spec["name"])
+            replay_pose = ((self.hdf5_replay_config or {}).get("object_poses") or {}).get(name)
+            if replay_pose is not None:
+                offset = spec.get("replay_pose_offset", [0.0, 0.0, 0.0])
+                spec["position"] = [float(v) + float(offset[i]) for i, v in enumerate(replay_pose["position"])]
+                spec["orientation_xyzw"] = replay_pose["orientation_xyzw"]
+            if name in object_names:
+                continue
+            try:
+                obj = DatasetObject(
+                    name=name,
+                    category=str(spec["category"]),
+                    model=str(spec["model"]),
+                    scale=spec.get("scale", [1.0, 1.0, 1.0]),
+                    expected_file_hash=spec.get("expected_file_hash"),
+                )
+                self.env.scene.add_object(obj)
+                obj.set_position_orientation(
+                    position=th.tensor([float(v) for v in spec["position"]], dtype=th.float32),
+                    orientation=th.tensor([float(v) for v in spec["orientation_xyzw"]], dtype=th.float32),
+                )
+                bridge.log(
+                    "demo_object_added",
+                    {
+                        "name": name,
+                        "category": spec["category"],
+                        "model": spec["model"],
+                        "position": spec["position"],
+                        "source": spec.get("source", "scene_profile.demo_objects"),
+                    },
+                )
+            except Exception as exc:
+                bridge.log("demo_object_add_failed", {"name": name, "reason": str(exc)})
+                self.add_scene_profile_object_placeholder(spec, reason=str(exc))
+
+    def sync_hdf5_replay_object_poses(self, reason):
+        if self.hdf5_replay_config is None:
+            return
+        object_states = self.hdf5_replay_config.get("object_states") or {}
+        for name, state in object_states.items():
+            obj = self.env.scene.object_registry("name", name)
+            if obj is None:
+                bridge.log("hdf5_replay_object_pose_missing", {"name": name, "reason": reason})
+                continue
+            root_link = state.get("root_link") or {}
+            if root_link.get("pos") is None or root_link.get("ori") is None:
+                continue
+            offset = [0.0, 0.0, 0.0]
+            if self.scene_profile is not None:
+                for spec in self.scene_profile.demo_objects:
+                    if str(spec.get("name")) == name:
+                        offset = spec.get("replay_pose_offset", offset)
+                        break
+            target_position = [float(v) + float(offset[i]) for i, v in enumerate(root_link["pos"])]
+            position = th.tensor(target_position, dtype=th.float32)
+            orientation = th.tensor([float(v) for v in root_link["ori"]], dtype=th.float32)
+            try:
+                obj.set_position_orientation(position=position, orientation=orientation)
+                if hasattr(obj, "set_linear_velocity"):
+                    obj.set_linear_velocity(th.zeros(3, dtype=th.float32))
+                if hasattr(obj, "set_angular_velocity"):
+                    obj.set_angular_velocity(th.zeros(3, dtype=th.float32))
+                if hasattr(obj, "keep_still"):
+                    obj.keep_still()
+                actual_pos, actual_ori = obj.get_position_orientation()
+                bridge.log(
+                    "hdf5_replay_object_pose_synced",
+                    {
+                        "name": name,
+                        "reason": reason,
+                        "target_position": target_position,
+                        "hdf5_position": root_link["pos"],
+                        "replay_pose_offset": offset,
+                        "actual_position": [float(v) for v in actual_pos.tolist()],
+                        "actual_orientation_xyzw": [float(v) for v in actual_ori.tolist()],
+                        "velocity_policy": "zero_keep_still",
+                    },
+                )
+            except Exception as exc:
+                bridge.log("hdf5_replay_object_pose_sync_failed", {"name": name, "reason": reason, "error": str(exc)})
+
+    def sync_hdf5_replay_robot_state(self, reason):
+        if self.hdf5_replay_config is None:
+            return
+        robot_state = self.hdf5_replay_config.get("robot_state") or {}
+        root_link = robot_state.get("root_link") or {}
+        try:
+            if root_link.get("pos") is not None and root_link.get("ori") is not None:
+                self.robot.set_position_orientation(
+                    position=th.tensor([float(v) for v in root_link["pos"]], dtype=th.float32),
+                    orientation=th.tensor([float(v) for v in root_link["ori"]], dtype=th.float32),
+                )
+            if robot_state.get("joint_pos") is not None and hasattr(self.robot, "set_joint_positions"):
+                self.robot.set_joint_positions(
+                    th.tensor([float(v) for v in robot_state["joint_pos"]], dtype=th.float32),
+                    drive=False,
+                )
+            if robot_state.get("joint_vel") is not None and hasattr(self.robot, "set_joint_velocities"):
+                self.robot.set_joint_velocities(
+                    th.tensor([float(v) for v in robot_state["joint_vel"]], dtype=th.float32),
+                    drive=False,
+                )
+            if root_link.get("lin_vel") is not None and hasattr(self.robot, "set_linear_velocity"):
+                self.robot.set_linear_velocity(th.tensor([float(v) for v in root_link["lin_vel"]], dtype=th.float32))
+            if root_link.get("ang_vel") is not None and hasattr(self.robot, "set_angular_velocity"):
+                self.robot.set_angular_velocity(th.tensor([float(v) for v in root_link["ang_vel"]], dtype=th.float32))
+            actual_pos, actual_ori = self.robot.get_position_orientation()
+            bridge.log(
+                "hdf5_replay_robot_state_synced",
+                {
+                    "reason": reason,
+                    "target_position": root_link.get("pos"),
+                    "actual_position": [float(v) for v in actual_pos.tolist()],
+                    "actual_orientation_xyzw": [float(v) for v in actual_ori.tolist()],
+                    "joint_count": len(robot_state.get("joint_pos") or []),
+                },
+            )
+        except Exception as exc:
+            bridge.log("hdf5_replay_robot_state_sync_failed", {"reason": reason, "error": str(exc)})
+
+    def add_scene_profile_object_placeholder(self, spec, reason: str):
+        name = f"{spec['name']}_placeholder"
+        try:
+            obj = PrimitiveObject(
+                name=name,
+                primitive_type="Cylinder",
+                category=str(spec.get("category", "demo_object")),
+                radius=0.035,
+                height=0.12,
+                fixed_base=True,
+                visual_only=False,
+                rgba=(0.95, 0.95, 0.98, 1.0),
+            )
+            self.env.scene.add_object(obj)
+            obj.set_position_orientation(
+                position=th.tensor([float(v) for v in spec["position"]], dtype=th.float32),
+                orientation=th.tensor([float(v) for v in spec["orientation_xyzw"]], dtype=th.float32),
+            )
+            bridge.log(
+                "demo_object_placeholder_added",
+                {
+                    "name": name,
+                    "for": spec["name"],
+                    "position": spec["position"],
+                    "reason": reason,
+                },
+            )
+        except Exception as placeholder_exc:
+            bridge.log(
+                "demo_object_placeholder_failed",
+                {"name": name, "reason": str(placeholder_exc), "original_reason": reason},
+            )
+
     def current_robot_pose(self):
         if self.robot is None:
             return None
@@ -1084,6 +1388,102 @@ class LiveControlledScene:
         human_pos = _get_dummy_position(self.dummy_root).tolist()
         return math.sqrt((robot_pos[0] - human_pos[0]) ** 2 + (robot_pos[1] - human_pos[1]) ** 2)
 
+    def ground_truth_resident_zone(self):
+        return self.activity_state.ground_truth_zone or self.episode_zone or "unknown"
+
+    def infer_scenario_type(self):
+        zone = self.ground_truth_resident_zone()
+        activity_id = self.activity_state.activity_id
+        distance = self.current_robot_resident_distance()
+        if zone == "configured_start":
+            return "configured_start"
+        if distance is not None and distance < 1.5:
+            return "resident_near_robot"
+        if activity_id in {"doing_laundry", "checking_laundry"} or zone in {"laundry", "utility_room"}:
+            return "laundry_ready"
+        if activity_id in {"showering", "bathroom_visit"} or zone == "bathroom":
+            return "bathroom_occupied"
+        if activity_id in {"arriving_home", "entry_living"} or zone in {"entry", "entry_living"}:
+            return "arrival_context"
+        if activity_id:
+            return "activity_context"
+        return "normal_context"
+
+    def risk_snapshot(self):
+        distance = self.current_robot_resident_distance()
+        if distance is None:
+            level = "unknown"
+        elif distance < 1.0:
+            level = "high"
+        elif distance < 2.0:
+            level = "medium"
+        else:
+            level = "low"
+        return {
+            "level": level,
+            "robot_resident_distance_m": distance,
+            "resident_near_robot": bool(distance is not None and distance < 1.5),
+            "min_robot_resident_distance_m": self.episode_metrics.get("min_robot_resident_distance_m"),
+        }
+
+    def ground_truth_snapshot(self):
+        human_pos = _get_dummy_position(self.dummy_root).tolist() if self.dummy_root is not None else None
+        return {
+            "resident_zone": self.ground_truth_resident_zone(),
+            "resident_position": human_pos,
+            "resident_heading_deg": float(self.human_heading_deg),
+            "activity_id": self.activity_state.activity_id,
+            "posture": self.activity_state.posture,
+            "virtual_sensors": dict(self.activity_state.virtual_sensors),
+            "robot_pose": self.current_robot_pose(),
+        }
+
+    def estimate_snapshot(self):
+        confidence = self.resident_context.get("confidence")
+        evidence = self.resident_context.get("evidence") or []
+        return {
+            "resident_zone": self.state.human.zone,
+            "last_known_resident_zone": self.state.motion.last_known_zone,
+            "resident_context": dict(self.resident_context),
+            "confidence": confidence,
+            "evidence": list(evidence),
+        }
+
+    def sensor_quality_snapshot(self):
+        ground_truth_zone = self.ground_truth_resident_zone()
+        estimated_zone = self.state.human.zone
+        motion_detected = bool(self.state.motion.detected)
+        motion_dropout = ground_truth_zone not in {None, "unknown", "configured_start"} and not motion_detected
+        zone_mismatch = (
+            ground_truth_zone not in {None, "unknown", "configured_start"}
+            and estimated_zone not in {None, "unknown"}
+            and estimated_zone != ground_truth_zone
+        )
+        faults = []
+        if motion_dropout:
+            faults.append("motion_dropout")
+        if zone_mismatch:
+            faults.append("zone_mismatch")
+        return {
+            "motion_detected": motion_detected,
+            "motion_dropout": bool(motion_dropout),
+            "zone_mismatch": bool(zone_mismatch),
+            "virtual_sensor_count": len(self.activity_state.virtual_sensors),
+            "has_activity_context": bool(self.activity_state.context),
+            "sensor_faults": faults,
+        }
+
+    def training_validity_snapshot(self):
+        return {
+            "context_model": True,
+            "task_selection": True,
+            "safety_eval": True,
+            "policy_behavior_cloning": False,
+            "policy_rollout_eval": False,
+            "policy_invalid_reason": "no_replay_action_label",
+            "usable_for": ["context_baseline", "task_selection", "safety_eval"],
+        }
+
     def update_episode_metrics(self):
         self.episode_metrics["frame_count"] += 1
         distance = self.current_robot_resident_distance()
@@ -1105,11 +1505,17 @@ class LiveControlledScene:
             "reason": event_reason,
             "task": data.get("robot", {}).get("task"),
             "robot_status": data.get("robot", {}).get("status"),
+            "scenario_type": data.get("scenario_type"),
             "resident": data.get("human"),
             "motion": data.get("motion"),
             "pressure": data.get("pressure"),
             "activity_context": data.get("activity_context"),
             "robot_context": data.get("robot", {}).get("context"),
+            "ground_truth": data.get("ground_truth"),
+            "estimates": data.get("estimates"),
+            "sensor_quality": data.get("sensor_quality"),
+            "risk": data.get("risk"),
+            "training_validity": data.get("training_validity"),
             "metrics": dict(self.episode_metrics),
         }
 
@@ -1129,21 +1535,34 @@ class LiveControlledScene:
         self.state.robot.task = None
         self.state.robot.replay_id = None
         self.robot_task_end_t = None
+        self.robot_replay_active = False
+        self.robot_replay_step = 0
         self.episode_id += 1
         self.episode_started_at = utc_now_iso()
+        self.episode_scenario_type = None
         self.episode_metrics = self.empty_episode_metrics()
         if randomize:
             self.episode_zone = self.choose_episode_zone(zone)
-            resident_pos = self.sample_resident_position_for_zone(self.episode_zone)
+            self.activity_state = self.activity_simulator.start_episode(self.episode_zone, self.rng)
+            resident_pos = self.sample_resident_position_for_zone(
+                self.episode_zone,
+                activity_spawn_points=self.activity_state.spawn_points,
+                collision_check=self.activity_state.spawn_collision_check,
+            )
         else:
             self.episode_zone = "configured_start"
+            self.activity_state = self.activity_simulator.start_episode(self.episode_zone, self.rng)
             resident_pos = self.human_start_position(PRESETS[self.args.preset])
-        self.human_target_pos = self.find_nearest_free_position(resident_pos)
-        self.human_heading_deg = 0.0
+        if self.activity_state.spawn_collision_check:
+            self.human_target_pos = self.find_nearest_free_position(resident_pos)
+        else:
+            self.human_target_pos = resident_pos
+        self.human_heading_deg = float(self.activity_state.heading_deg) if self.activity_state.heading_deg is not None else 0.0
         self._set_human_pose(self.human_target_pos, self.human_heading_deg)
-        self.activity_state = self.activity_simulator.start_episode(self.episode_zone, self.rng)
+        self._set_human_visual_posture(self.activity_state.posture)
         self.set_camera("overview")
         self.read_sensors()
+        self.episode_scenario_type = self.infer_scenario_type()
         payload = self.episode_payload(event_reason=reason)
         payload["sampled_position"] = self.human_target_pos
         self.episode_logger.write("episode_start", payload)
@@ -1202,6 +1621,79 @@ class LiveControlledScene:
         with og.sim.editing_usd():
             apply_pose()
 
+    def _set_human_visual_posture(self, posture):
+        if self.dummy_root is None or posture == self.human_posture:
+            return
+
+        pxr = lazy.pxr
+        stage = og.sim.stage
+
+        def set_translate(name, xyz):
+            prim = stage.GetPrimAtPath(f"/World/dummy_human/{name}")
+            if prim and prim.IsValid():
+                attr = prim.GetAttribute("xformOp:translate")
+                if attr:
+                    attr.Set(pxr.Gf.Vec3d(*xyz))
+
+        def set_rotate_x(name, deg):
+            prim = stage.GetPrimAtPath(f"/World/dummy_human/{name}")
+            if not prim or not prim.IsValid():
+                return
+            attr = prim.GetAttribute("xformOp:rotateX")
+            if attr:
+                attr.Set(float(deg))
+                return
+            try:
+                pxr.UsdGeom.Xformable(prim).AddRotateXOp().Set(float(deg))
+            except Exception:
+                pass
+
+        def apply_posture():
+            if posture == "seated":
+                set_translate("torso", (0.0, 0.0, 0.78))
+                set_translate("head", (0.0, 0.0, 1.16))
+                set_translate("hair", (0.0, -0.02, 1.28))
+                set_translate("left_leg", (-0.07, 0.18, 0.42))
+                set_translate("right_leg", (0.07, 0.18, 0.42))
+                set_rotate_x("left_leg", 82.0)
+                set_rotate_x("right_leg", 82.0)
+                set_translate("left_arm", (-0.22, 0.02, 0.76))
+                set_translate("right_arm", (0.22, 0.02, 0.76))
+                set_translate("left_hand", (-0.23, 0.14, 0.58))
+                set_translate("right_hand", (0.23, 0.14, 0.58))
+                set_translate("left_shoe", (-0.07, 0.50, 0.24))
+                set_translate("right_shoe", (0.07, 0.50, 0.24))
+                set_rotate_x("left_shoe", 82.0)
+                set_rotate_x("right_shoe", 82.0)
+            else:
+                # Recreate the procedural standing layout used by add_demo_human_avatar(height=1.7).
+                height = 1.7
+                leg_h = height * 0.40
+                torso_h = height * 0.38
+                shoulder_z = leg_h + torso_h * 0.72
+                torso_radius = height * 0.105
+                limb_radius = height * 0.032
+                head_radius = height * 0.088
+                set_translate("torso", (0.0, 0.0, leg_h + torso_h * 0.48))
+                set_translate("head", (0.0, 0.0, leg_h + torso_h + head_radius * 1.15))
+                set_translate("hair", (0.0, -head_radius * 0.14, leg_h + torso_h + head_radius * 1.82))
+                set_translate("left_leg", (-torso_radius * 0.42, 0.0, leg_h * 0.5))
+                set_translate("right_leg", (torso_radius * 0.42, 0.0, leg_h * 0.5))
+                set_rotate_x("left_leg", 0.0)
+                set_rotate_x("right_leg", 0.0)
+                set_translate("left_arm", (-torso_radius * 1.28, 0.0, shoulder_z))
+                set_translate("right_arm", (torso_radius * 1.28, 0.0, shoulder_z))
+                set_translate("left_hand", (-torso_radius * 1.30, 0.04, shoulder_z - torso_h * 0.40))
+                set_translate("right_hand", (torso_radius * 1.30, 0.04, shoulder_z - torso_h * 0.40))
+                set_translate("left_shoe", (-torso_radius * 0.42, 0.08, 0.04))
+                set_translate("right_shoe", (torso_radius * 0.42, 0.08, 0.04))
+                set_rotate_x("left_shoe", 0.0)
+                set_rotate_x("right_shoe", 0.0)
+
+        with og.sim.editing_usd():
+            apply_posture()
+        self.human_posture = posture
+
     def human_forward_from_heading(self, heading_deg=None):
         heading = math.radians(self.human_heading_deg if heading_deg is None else heading_deg)
         return [-math.sin(heading), math.cos(heading)]
@@ -1252,8 +1744,10 @@ class LiveControlledScene:
             except Exception:
                 robot_pos = None
             if robot_pos is not None:
-                position = [robot_pos[0] - forward[0] * 1.85, robot_pos[1] - forward[1] * 1.85, robot_pos[2] + 1.45]
-                look_at = [robot_pos[0] + forward[0] * 0.45, robot_pos[1] + forward[1] * 0.45, robot_pos[2] + 0.75]
+                distance = 2.8 if self.robot_replay_active else 2.35
+                target_ahead = 1.15 if self.robot_replay_active else 0.8
+                position = [robot_pos[0] - forward[0] * distance, robot_pos[1] - forward[1] * distance, robot_pos[2] + 1.25]
+                look_at = [robot_pos[0] + forward[0] * target_ahead, robot_pos[1] + forward[1] * target_ahead, robot_pos[2] + 0.68]
             else:
                 preset = CAMERA_PRESETS[mode]
                 position = preset["position"]
@@ -1271,7 +1765,50 @@ class LiveControlledScene:
             orientation=orientation,
         )
 
+    def capture_default_viewer_camera_pose(self):
+        try:
+            position, orientation = og.sim.viewer_camera.get_position_orientation()
+            self.default_viewer_camera_pose = {
+                "position": [float(v) for v in position.tolist()],
+                "orientation_xyzw": [float(v) for v in orientation.tolist()],
+            }
+            bridge.log("default_viewer_camera_captured", self.default_viewer_camera_pose)
+        except Exception as exc:
+            self.default_viewer_camera_pose = None
+            bridge.log("default_viewer_camera_capture_failed", {"reason": str(exc)})
+
+    def enable_default_viewer_camera_controls(self):
+        try:
+            self.viewer_camera_mover = og.sim.enable_viewer_camera_teleoperation()
+            self.viewer_camera_mover.set_delta(float(getattr(self.args, "camera_speed", 0.08)))
+            bridge.log("default_viewer_camera_controls_enabled", {"camera_speed": float(getattr(self.args, "camera_speed", 0.08))})
+        except Exception as exc:
+            self.viewer_camera_mover = None
+            bridge.log("default_viewer_camera_controls_failed", {"reason": str(exc)})
+
+    def restore_default_viewer_camera(self):
+        if self.default_viewer_camera_pose is None:
+            bridge.log("default_viewer_camera_restore_skipped", {"reason": "no captured default viewer camera pose"})
+            return None
+        pose = self.default_viewer_camera_pose
+        og.sim.viewer_camera.set_position_orientation(
+            position=th.tensor(pose["position"], dtype=th.float32),
+            orientation=th.tensor(pose["orientation_xyzw"], dtype=th.float32),
+        )
+        bridge.log("default_viewer_camera_restored", {"reason": "hdf5_replay_robot_camera", **pose})
+        return pose
+
     def set_camera(self, mode):
+        if mode == "robot" and self.robot_replay_active:
+            pose = self.restore_default_viewer_camera()
+            self.state.camera_mode = mode
+            self.mark_ceiling_visibility_dirty()
+            return {
+                "mode": mode,
+                "camera": "omnigibson_default_viewer",
+                "position": None if pose is None else pose["position"],
+                "orientation_xyzw": None if pose is None else pose["orientation_xyzw"],
+            }
         mode, position, look_at = self._viewer_camera_pose(mode)
         self._apply_viewer_camera_pose(mode, position, look_at)
         self.state.camera_mode = mode
@@ -1280,6 +1817,8 @@ class LiveControlledScene:
 
     def update_follow_camera(self, now):
         if self.video_source != "viewer" or self.state.camera_mode not in {"robot", "resident"}:
+            return
+        if self.state.camera_mode == "robot" and self.robot_replay_active:
             return
         if now - self.last_follow_camera_t < self.follow_camera_interval_s:
             return
@@ -1293,6 +1832,35 @@ class LiveControlledScene:
         self.clear_viewport_input()
         self.human_input_vector = (0.0, 0.0, 0.0)
         self.human_target_pos = _get_dummy_position(self.dummy_root).tolist()
+        if task == "deliver_item" and self.hdf5_replay_actions is not None:
+            self.sync_hdf5_replay_object_poses("replay_start")
+            self.sync_hdf5_replay_robot_state("replay_start")
+            self.state.robot.status = "running_replay"
+            self.state.robot.task = task
+            self.state.robot.replay_id = self.hdf5_replay_id
+            self.robot_replay_active = True
+            self.robot_replay_step = 0
+            self.robot_task_end_t = None
+            self.episode_metrics["task_started"] = True
+            self.episode_metrics["last_task"] = task
+            self.episode_metrics["last_replay_id"] = self.hdf5_replay_id
+            self.set_camera("robot")
+            self.episode_logger.write("task_started", self.episode_payload(event_reason="hdf5_action_replay_started"))
+            bridge.log(
+                "hdf5_action_replay_started",
+                {
+                    "task": task,
+                    "replay_id": self.hdf5_replay_id,
+                    "num_actions": int(self.hdf5_replay_actions.shape[0]),
+                    "camera_mode": self.state.camera_mode,
+                },
+            )
+            return {
+                "event": "hdf5_action_replay_started",
+                "task": task,
+                "replay_id": self.hdf5_replay_id,
+                "num_actions": int(self.hdf5_replay_actions.shape[0]),
+            }
         try:
             replay = self.registry.select(TaskCommand(task=task), self.state)
         except ReplaySelectionError as exc:
@@ -1323,20 +1891,52 @@ class LiveControlledScene:
         self.human_target_pos = self.find_nearest_free_position(human_start_pos)
         self.human_heading_deg = 0.0
         self._set_human_pose(self.human_target_pos, self.human_heading_deg)
+        self._set_human_visual_posture("standing")
         self.state.robot.status = "idle"
         self.state.robot.task = None
         self.state.robot.replay_id = None
         self.robot_task_end_t = None
+        self.robot_replay_active = False
+        self.robot_replay_step = 0
         self.set_camera("overview")
         self.read_sensors()
         return {"position": self.human_target_pos}
 
     def update_task(self):
+        if self.robot_replay_active and self.hdf5_replay_actions is not None:
+            if self.robot_replay_step >= len(self.hdf5_replay_actions):
+                self.state.robot.status = "completed"
+                self.robot_replay_active = False
+                self.episode_metrics["task_completed"] = True
+                self.episode_logger.write("task_completed", self.episode_payload(event_reason="hdf5_action_replay_finished"))
+                bridge.log(
+                    "hdf5_action_replay_finished",
+                    {"replay_id": self.hdf5_replay_id, "steps": int(self.robot_replay_step)},
+                )
+            return
         if self.robot_task_end_t is not None and time() >= self.robot_task_end_t:
             self.state.robot.status = "completed"
             self.robot_task_end_t = None
             self.episode_metrics["task_completed"] = True
             self.episode_logger.write("task_completed", self.episode_payload(event_reason="task_duration_elapsed"))
+
+    def next_robot_action(self):
+        if not self.robot_replay_active or self.hdf5_replay_actions is None:
+            return self.zero_action
+        if self.robot_replay_step >= len(self.hdf5_replay_actions):
+            return self.zero_action
+        action = self.hdf5_replay_actions[self.robot_replay_step]
+        if self.robot_replay_step % 30 == 0:
+            bridge.log(
+                "hdf5_action_replay_step",
+                {
+                    "replay_id": self.hdf5_replay_id,
+                    "step": int(self.robot_replay_step),
+                    "total": int(len(self.hdf5_replay_actions)),
+                },
+            )
+        self.robot_replay_step += 1
+        return action
 
     def update_heavy_load(self, sim_t):
         return
@@ -1391,6 +1991,8 @@ class LiveControlledScene:
             "resident_context": self.resident_context,
             "activity_id": self.activity_state.activity_id,
             "virtual_sensors": dict(self.activity_state.virtual_sensors),
+            "ground_truth_resident_zone": self.ground_truth_resident_zone(),
+            "scenario_type": self.episode_scenario_type or self.infer_scenario_type(),
         }
 
     def snapshot(self):
@@ -1408,10 +2010,18 @@ class LiveControlledScene:
             "enabled": bool(self.activity_state.enabled),
             "activity_id": self.activity_state.activity_id,
             "ground_truth_zone": self.activity_state.ground_truth_zone,
+            "posture": self.activity_state.posture,
+            "movement_enabled": bool(self.activity_state.movement_enabled),
             "virtual_sensors": dict(self.activity_state.virtual_sensors),
             "resident_context": dict(self.resident_context),
         }
-        data["robot_pose"] = self.current_robot_pose()
+        data["scenario_type"] = self.episode_scenario_type or self.infer_scenario_type()
+        data["ground_truth"] = self.ground_truth_snapshot()
+        data["estimates"] = self.estimate_snapshot()
+        data["sensor_quality"] = self.sensor_quality_snapshot()
+        data["risk"] = self.risk_snapshot()
+        data["training_validity"] = self.training_validity_snapshot()
+        data["robot_pose"] = data["ground_truth"]["robot_pose"]
         return data
 
     def log_step(self, now, sim_t, frame):
@@ -1426,6 +2036,7 @@ class LiveControlledScene:
                 "episode_id": self.episode_id,
                 "episode_seed": self.episode_seed,
                 "episode_zone": self.episode_zone,
+                "scenario_type": data.get("scenario_type"),
                 "frame": int(frame),
                 "sim_time_s": float(sim_t),
                 "wall_time_s": float(now),
@@ -1433,8 +2044,14 @@ class LiveControlledScene:
                 "motion": data.get("motion"),
                 "pressure": data.get("pressure"),
                 "robot": data.get("robot"),
+                "robot_pose": data.get("robot_pose"),
                 "camera_mode": data.get("camera_mode"),
                 "activity_context": data.get("activity_context"),
+                "ground_truth": data.get("ground_truth"),
+                "estimates": data.get("estimates"),
+                "sensor_quality": data.get("sensor_quality"),
+                "risk": data.get("risk"),
+                "training_validity": data.get("training_validity"),
                 "metrics": dict(self.episode_metrics),
             }
         )
@@ -1460,7 +2077,7 @@ class LiveControlledScene:
             self.update_viewport_hud(now)
             self.capture_video_frame(now)
             frame += 1
-            self.env.step(action=self.zero_action)
+            self.env.step(action=self.next_robot_action())
 
 
 def start_server(host, port):
@@ -1520,6 +2137,12 @@ def main():
         help="Make R/reset start a randomized episode instead of returning to the configured resident start pose.",
     )
     parser.add_argument("--robot-type", choices=["R1", "R1Pro"], default="R1Pro")
+    parser.add_argument(
+        "--hdf5-replay",
+        default=None,
+        help="Optional HDF5 action replay to run inside the HomeSense scene when T / deliver_item is triggered.",
+    )
+    parser.add_argument("--hdf5-replay-episode", type=int, default=0)
     parser.add_argument("--cpu-dynamics", action="store_true", help="Use CPU dynamics instead of GPU dynamics for heavier full-scene demos.")
     parser.add_argument(
         "--flatcache",

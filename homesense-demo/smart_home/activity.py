@@ -11,6 +11,11 @@ class ActivityState:
     enabled: bool = False
     activity_id: str | None = None
     ground_truth_zone: str | None = None
+    spawn_points: list[list[float]] = field(default_factory=list)
+    spawn_collision_check: bool = True
+    heading_deg: float | None = None
+    posture: str = "standing"
+    movement_enabled: bool = True
     virtual_sensors: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
 
@@ -27,6 +32,9 @@ class ActivitySensorSimulator:
         if profile is None:
             return ActivityState(enabled=True, ground_truth_zone=zone)
         sensors = copy.deepcopy(profile.get("sensors") or {})
+        spawn_points = copy.deepcopy(profile.get("spawn_points") or [])
+        heading_deg = profile.get("heading_deg")
+        posture = str(profile.get("posture") or "standing")
         activity_id = str(profile.get("activity_id") or "unspecified_activity")
         evidence = [f"{key}={value}" for key, value in sensors.items()]
         context = {
@@ -40,6 +48,11 @@ class ActivitySensorSimulator:
             enabled=True,
             activity_id=activity_id,
             ground_truth_zone=zone,
+            spawn_points=spawn_points,
+            spawn_collision_check=bool(profile.get("spawn_collision_check", True)),
+            heading_deg=float(heading_deg) if heading_deg is not None else None,
+            posture=posture,
+            movement_enabled=bool(profile.get("movement_enabled", True)),
             virtual_sensors=sensors,
             context=context,
         )

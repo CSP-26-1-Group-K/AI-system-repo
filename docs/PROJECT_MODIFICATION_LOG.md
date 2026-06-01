@@ -408,3 +408,27 @@ context baseline 학습:
 ```
 
 이 baseline은 로봇 제어 정책이 아니라, 생성된 context dataset이 실제 model artifact로 변환될 수 있음을 보여주는 최소 proof path다.
+
+## 14. Dataset Quality Metadata 추가
+
+replay 데이터가 아직 없는 상태에서도 수집 로그의 품질을 판단할 수 있도록 `steps.jsonl`과 episode event payload에 quality metadata를 추가했다.
+
+추가된 필드:
+
+- `ground_truth`: simulator 기준 resident zone, resident pose, activity id, virtual sensor, robot pose
+- `estimates`: sensor/context estimator 기준 resident zone, last-known zone, confidence, evidence
+- `sensor_quality`: motion dropout, zone mismatch, virtual sensor count, fault labels
+- `risk`: robot-resident distance, near-robot 여부, risk level
+- `training_validity`: context model / task selection / safety eval / behavior cloning 사용 가능 여부
+- `scenario_type`: arrival, bathroom, laundry, near-robot 등 episode 성격 라벨
+
+현재 `policy_behavior_cloning`은 항상 false다. 이유는 아직 replay action label이 없기 때문이다. 이 상태의 데이터는 robot policy 학습용이라고 주장하지 않고, context baseline, task selection, safety evaluation, failure-case discovery용 데이터로만 사용한다.
+
+데이터셋 요약 스크립트:
+
+```bash
+/home/user/Desktop/isaac-sim-5.1/python.sh examples/smart_home/summarize_episode_dataset.py \
+  logs/homesense_episodes/run_<timestamp>
+```
+
+요약 결과는 zone/scenario/activity/risk 분포, motion detection/dropout rate, training validity rate를 JSON으로 출력한다. 발표에서는 이 summary를 통해 “트윈 실행 -> 센서/context 데이터 생성 -> 데이터 품질 점검 -> baseline 학습 또는 replay 조건화” 루프를 설명한다.

@@ -6,10 +6,21 @@ resident:
 robot:
   model: R1Pro
   start_position: [0.0, 0.0, 0.0053]
-  start_yaw_deg: 0.0
-  forward_axis: "+X"
-  start_orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
-  note: "Explicit replay collection reference pose. Observed OmniGibson default was approximately [0, 0, 0.005285], yaw 0 deg."
+  start_yaw_deg: 180.0
+  forward_axis: "-X"
+  start_orientation_xyzw: [0.0, 0.0, 1.0, 0.0]
+  note: "Explicit replay collection reference pose. Robot faces the opposite direction of the observed OmniGibson default (+X), i.e. -X / yaw 180 deg."
+
+demo_objects:
+  - name: medicine_bottle_0
+    category: bottle_of_medicine
+    model: kasbsy
+    expected_file_hash: 9c748d5b0551b939392f96f6d42c5431
+    position: [-1.9528437852859497, -0.10671354085206985, 1.0455327033996582]
+    orientation_xyzw: [-0.010209739208221436, -0.02518530935049057, -0.0011579676065593958, 0.9996300935745239]
+    replay_pose_offset: [0.0, 0.0, 0.0]
+    scale: [1.0, 1.0, 1.0]
+    source: temp_1780307149426.-1673111485.json
 
 overview_camera:
   auto_from_scene_bounds: true
@@ -135,6 +146,10 @@ activity_profiles:
     - activity_id: arriving_home
       weight: 1.0
       confidence: 0.82
+      spawn_points:
+        - [3.37, 9.72, 0.0]
+        - [3.55, 9.58, 0.0]
+      heading_deg: 180.0
       sensors:
         entry_floor_mat: occupied
         entry_light: on
@@ -145,6 +160,13 @@ activity_profiles:
     - activity_id: watching_tv
       weight: 0.7
       confidence: 0.88
+      spawn_points:
+        - [1.95, 8.84, 0.0]
+        - [1.95, 9.28, 0.0]
+      spawn_collision_check: false
+      heading_deg: -90.0
+      posture: seated
+      movement_enabled: false
       sensors:
         sofa_pressure: occupied
         tv_power: on
@@ -153,6 +175,13 @@ activity_profiles:
     - activity_id: resting_on_sofa
       weight: 0.3
       confidence: 0.84
+      spawn_points:
+        - [1.95, 8.84, 0.0]
+        - [1.95, 9.28, 0.0]
+      spawn_collision_check: false
+      heading_deg: -90.0
+      posture: seated
+      movement_enabled: false
       sensors:
         sofa_pressure: occupied
         tv_power: off
@@ -163,6 +192,9 @@ activity_profiles:
     - activity_id: showering
       weight: 0.7
       confidence: 0.9
+      spawn_points:
+        - [3.18, 5.48, 0.0]
+      heading_deg: 90.0
       sensors:
         bathroom_floor_mat: occupied
         shower_flow: on
@@ -171,6 +203,10 @@ activity_profiles:
     - activity_id: bathroom_visit
       weight: 0.3
       confidence: 0.8
+      spawn_points:
+        - [2.92, 5.18, 0.0]
+        - [3.10, 5.25, 0.0]
+      heading_deg: 0.0
       sensors:
         bathroom_floor_mat: occupied
         shower_flow: off
@@ -181,6 +217,10 @@ activity_profiles:
     - activity_id: resting_in_bedroom
       weight: 0.65
       confidence: 0.86
+      spawn_points:
+        - [3.35, 1.35, 0.0]
+        - [3.10, 1.65, 0.0]
+      heading_deg: 90.0
       sensors:
         bed_pressure: occupied
         bedroom_light: dim
@@ -188,6 +228,10 @@ activity_profiles:
     - activity_id: bedroom_activity
       weight: 0.35
       confidence: 0.76
+      spawn_points:
+        - [3.45, 2.10, 0.0]
+        - [3.05, 2.05, 0.0]
+      heading_deg: 90.0
       sensors:
         bed_pressure: empty
         bedroom_light: on
@@ -197,6 +241,10 @@ activity_profiles:
     - activity_id: doing_laundry
       weight: 0.75
       confidence: 0.88
+      spawn_points:
+        - [0.20, -1.10, 0.0]
+        - [-0.10, -1.05, 0.0]
+      heading_deg: 90.0
       sensors:
         utility_floor_mat: occupied
         washing_machine_state: running
@@ -205,6 +253,10 @@ activity_profiles:
     - activity_id: checking_laundry
       weight: 0.25
       confidence: 0.78
+      spawn_points:
+        - [0.20, -1.10, 0.0]
+        - [-0.72, -1.08, 0.0]
+      heading_deg: 90.0
       sensors:
         utility_floor_mat: occupied
         washing_machine_state: idle

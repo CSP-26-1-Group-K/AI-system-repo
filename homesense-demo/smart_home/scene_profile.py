@@ -22,6 +22,7 @@ class SceneProfile:
     overview_camera: dict[str, Any] | None = None
     ceiling_model_ids: tuple[str, ...] = field(default_factory=tuple)
     activity_profiles: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    demo_objects: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     @property
     def primary_pressure_sensor(self) -> dict[str, Any] | None:
@@ -88,4 +89,5 @@ def load_scene_profile(repo_root: Path, scene_model: str) -> SceneProfile | None
         overview_camera=dict(data["overview_camera"]) if data.get("overview_camera") else None,
         ceiling_model_ids=tuple(str(model_id).lower() for model_id in data.get("ceiling_model_ids", [])),
         activity_profiles=dict(data.get("activity_profiles") or {}),
+        demo_objects=tuple(dict(obj) for obj in data.get("demo_objects", [])),
     )

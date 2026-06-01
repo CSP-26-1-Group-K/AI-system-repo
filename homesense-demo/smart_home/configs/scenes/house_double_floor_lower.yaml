@@ -1,0 +1,209 @@
+scene_model: house_double_floor_lower
+
+resident:
+  start_position: [1.90, 6.05, 0.0]
+
+robot:
+  model: R1Pro
+  start_position: [5.29986572265625, 5.574432373046875, 0.003753662109375]
+  start_yaw_deg: -137.08492738949698
+  start_orientation_xyzw: [0.0, 0.0, -0.9306889176368713, 0.3658115565776825]
+  source: vr_demo_test_v01.hdf5 metadata.task.robot_poses.R1Pro
+  note: "Reference pose for the temporary turning_on_radio replay scene."
+
+overview_camera:
+  auto_from_scene_bounds: true
+
+zones:
+  entry_door:
+    center: [4.70, 7.67, 0.0]
+    spawn_radius_m: 0.15
+    spawn_points:
+      - [4.35, 7.20, 0.0]
+      - [4.95, 7.15, 0.0]
+  sofa_area:
+    center: [1.90, 6.05, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [1.90, 6.05, 0.0]
+      - [2.18, 5.82, 0.0]
+  coffee_table:
+    center: [3.52, 5.29, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [3.18, 5.62, 0.0]
+      - [3.05, 4.98, 0.0]
+  radio_table:
+    center: [3.46, 4.89, 0.0]
+    spawn_radius_m: 0.10
+    spawn_points:
+      - [3.10, 4.82, 0.0]
+      - [3.35, 5.25, 0.0]
+  media_console:
+    center: [6.30, 4.50, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [5.82, 4.58, 0.0]
+      - [5.72, 4.18, 0.0]
+  counter_fireplace:
+    center: [5.95, 6.70, 0.0]
+    spawn_radius_m: 0.12
+    spawn_points:
+      - [5.62, 6.30, 0.0]
+      - [5.35, 6.78, 0.0]
+
+motion_sensors:
+  - sensor_id: motion_entry_door_ceiling
+    zone: entry_door
+    placement: ceiling near the only visible door, downward entry coverage
+    position: [4.70, 7.67, 2.35]
+    yaw_deg: 0.0
+    range_m: 1.35
+    fov_deg: 360.0
+
+  - sensor_id: motion_sofa_ceiling
+    zone: sofa_area
+    placement: ceiling above sofa seating area
+    position: [1.90, 6.05, 2.35]
+    yaw_deg: 0.0
+    range_m: 1.45
+    fov_deg: 360.0
+
+  - sensor_id: motion_coffee_table_ceiling
+    zone: coffee_table
+    placement: ceiling above central coffee table circulation area
+    position: [3.52, 5.29, 2.35]
+    yaw_deg: 0.0
+    range_m: 1.35
+    fov_deg: 360.0
+
+  - sensor_id: motion_radio_wall
+    zone: radio_table
+    placement: wall/fixture coverage of the radio interaction area
+    position: [3.46, 4.45, 1.55]
+    yaw_deg: 90.0
+    range_m: 1.25
+    fov_deg: 80.0
+
+  - sensor_id: motion_tv_console_wall
+    zone: media_console
+    placement: near TV console, looking back into the media area
+    position: [6.15, 4.50, 1.35]
+    yaw_deg: 180.0
+    range_m: 1.55
+    fov_deg: 75.0
+
+  - sensor_id: motion_counter_fireplace_ceiling
+    zone: counter_fireplace
+    placement: ceiling coverage around countertop and fireplace side
+    position: [5.95, 6.70, 2.35]
+    yaw_deg: 0.0
+    range_m: 1.35
+    fov_deg: 360.0
+
+pressure_sensors:
+  - sensor_id: pressure_sofa_0
+    zone: sofa_area
+    position: [1.90, 6.05, 0.04]
+    size: [1.45, 0.85, 0.03]
+    threshold_kg: 6.0
+    visual: false
+
+encoder:
+  zone_order: [entry_door, sofa_area, coffee_table, radio_table, media_console, counter_fireplace]
+  pressure_max_kg: 12.0
+
+activity_profiles:
+  entry_door:
+    - activity_id: entering_room
+      weight: 1.0
+      confidence: 0.82
+      spawn_points:
+        - [4.35, 7.20, 0.0]
+        - [4.95, 7.15, 0.0]
+      heading_deg: -90.0
+      sensors:
+        entry_motion: detected
+        door_contact: recently_opened
+        ambient_noise_db: 42
+
+  sofa_area:
+    - activity_id: watching_tv
+      weight: 0.6
+      confidence: 0.9
+      spawn_points:
+        - [1.90, 6.05, 0.0]
+      spawn_collision_check: false
+      heading_deg: -20.0
+      posture: seated
+      movement_enabled: false
+      sensors:
+        sofa_pressure: occupied
+        tv_power: on
+        ambient_noise_db: 48
+    - activity_id: resting_on_sofa
+      weight: 0.4
+      confidence: 0.84
+      spawn_points:
+        - [1.90, 6.05, 0.0]
+      spawn_collision_check: false
+      heading_deg: -20.0
+      posture: seated
+      movement_enabled: false
+      sensors:
+        sofa_pressure: occupied
+        tv_power: off
+        ambient_noise_db: 32
+
+  coffee_table:
+    - activity_id: passing_coffee_table
+      weight: 1.0
+      confidence: 0.76
+      spawn_points:
+        - [3.18, 5.62, 0.0]
+        - [3.05, 4.98, 0.0]
+      heading_deg: 0.0
+      sensors:
+        coffee_table_motion: detected
+        ambient_noise_db: 38
+
+  radio_table:
+    - activity_id: listening_to_radio
+      weight: 1.0
+      confidence: 0.86
+      spawn_points:
+        - [3.10, 4.82, 0.0]
+        - [3.35, 5.25, 0.0]
+      heading_deg: -80.0
+      sensors:
+        radio_power: on
+        radio_interaction: recent
+        ambient_noise_db: 52
+
+  media_console:
+    - activity_id: using_media_console
+      weight: 1.0
+      confidence: 0.78
+      spawn_points:
+        - [5.82, 4.58, 0.0]
+        - [5.72, 4.18, 0.0]
+      heading_deg: 180.0
+      sensors:
+        tv_power: on
+        media_console_motion: detected
+        ambient_noise_db: 46
+
+  counter_fireplace:
+    - activity_id: using_countertop
+      weight: 1.0
+      confidence: 0.74
+      spawn_points:
+        - [5.62, 6.30, 0.0]
+        - [5.35, 6.78, 0.0]
+      heading_deg: 90.0
+      sensors:
+        countertop_motion: detected
+        room_light: on
+        ambient_noise_db: 40
+
+ceiling_model_ids: [alydei, aoekre, feolie, isizwh, kbxtoc, sbkyof, vkfllw]

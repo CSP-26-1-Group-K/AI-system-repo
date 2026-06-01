@@ -5,6 +5,15 @@ robot policy itself multi-scene. The current robot movement demo is still
 validated only on `Merom_0_int`; additional scenes should add a profile here and
 start with sensor/resident context validation before robot rollout.
 
+## Current Profiles
+
+- `merom_0_int.yaml`: primary HomeSense digital-twin demo scene.
+- `house_double_floor_lower.yaml`: temporary replay scene profile for
+  `vr_demo_test_v01.hdf5` / `turning_on_radio`. This profile was created from
+  the replay task JSON before the actual scene asset subset arrived, so sensor
+  and resident positions should be visually revalidated after downloading
+  `datasets/behavior-1k-assets/scenes/house_double_floor_lower`.
+
 ## Required Fields
 
 - `scene_model`: BEHAVIOR / OmniGibson scene model name.

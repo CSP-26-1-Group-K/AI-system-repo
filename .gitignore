@@ -24,9 +24,19 @@ out/
 *.7z
 *.rar
 *.sha256
+*.hdf5
+*.h5
+*.mp4
 drive-download-*/
 drive-download-*.zip
 collab_env_export_*/
+
+# Replay transfer / analysis scratch files
+/asset_files.txt
+/object_models.txt
+/replay_*_requirements.json
+/temp_*.json
+/house_double_floor_lower_task_*_template-partial_rooms.json
 
 # BEHAVIOR / OmniGibson source and datasets are not tracked from this repo.
 # We keep a small HomeSense code snapshot under homesense-demo/ instead.
