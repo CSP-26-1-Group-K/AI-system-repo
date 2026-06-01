@@ -43,3 +43,40 @@ Current source-of-truth document:
 - `docs/PROJECT_PROGRESS_2026-05-30.md`
 
 See also `docs/NETWORK_TECH_STACK_QA.md` for presentation Q&A notes.
+
+## Running the OmniGibson Demo Locally
+
+This Git repository does not include the full `BEHAVIOR-1K/` working tree or datasets. Run the demo from the local project root where `BEHAVIOR-1K/`, Isaac Sim, and the required scene assets are already installed.
+
+From `/home/user/Projects/csp-2026-k/BEHAVIOR-1K`:
+
+```bash
+TORCHDYNAMO_DISABLE=1 /home/user/Desktop/isaac-sim-5.1/python.sh \
+  examples/smart_home/run_live_control_scene.py \
+  --scene-model Merom_0_int \
+  --full \
+  --cpu-dynamics \
+  --robot-type R1Pro \
+  --hdf5-replay /home/user/Projects/csp-2026-k/delivery_med_room_1_v01.hdf5 \
+  --enable-activity-sensors \
+  --step-log-hz 2.0
+```
+
+Viewport controls:
+
+- `N`: start a new randomized resident/context episode
+- `T`: run the delivery replay task
+- `1`: top overview camera
+- `2`: resident follow camera
+- `3`: robot/replay camera
+- `F`: toggle motion sensor range visualization
+- `W/A/S/D`: move resident when movement is enabled
+- `Q/E`: rotate resident in resident-follow mode
+
+Generated dataset logs are written under:
+
+```text
+BEHAVIOR-1K/logs/homesense_episodes/
+```
+
+Each run creates an `episodes_<timestamp>.jsonl` event summary and a matching `run_<timestamp>/` directory containing `manifest.json`, `events.jsonl`, and `steps.jsonl`.
