@@ -19,7 +19,9 @@ start with sensor/resident context validation before robot rollout.
 - `scene_model`: BEHAVIOR / OmniGibson scene model name.
 - `resident.start_position`: default resident spawn pose for reset and startup.
 - `zones`: semantic areas used by sensors, logs, and future episode randomizers.
-- `motion_sensors`: scene-specific installed motion sensor slots.
+- `motion_sensors`: default scene-specific installed motion sensor slots.
+- `sensor_layouts`: optional named motion sensor variants such as `current`,
+  `dense`, and `sparse`.
 - `pressure_sensors`: optional pressure sensor slots.
 
 ## Optional Fields
@@ -30,6 +32,8 @@ start with sensor/resident context validation before robot rollout.
 - `door_object_names`: exact object names for deprecated runtime door hiding.
 - `ceiling_model_ids`: scene-specific ceiling prim names to hide in overview.
 - `encoder.zone_order`: stable zone order for sensor vector encoding.
+- `activity_profiles`: zone-specific resident context profiles, including
+  spawn points, posture labels, virtual sensor values, and movement lock flags.
 
 ## Extension Rule
 
@@ -43,6 +47,12 @@ Then run with:
 
 ```bash
 python examples/smart_home/run_live_control_scene.py --scene-model <SceneModel> --full --cpu-dynamics
+```
+
+For scenes with multiple sensor variants:
+
+```bash
+python examples/smart_home/run_live_control_scene.py --scene-model Merom_0_int --full --cpu-dynamics --sensor-layout dense
 ```
 
 If no profile exists, the demo still launches with preset fallback values, but

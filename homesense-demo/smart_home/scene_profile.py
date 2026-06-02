@@ -13,6 +13,7 @@ class SceneProfile:
     human_start_pos: tuple[float, float, float]
     robot: dict[str, Any] = field(default_factory=dict)
     motion_sensors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    sensor_layouts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
     pressure_sensors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     zones: dict[str, dict[str, Any]] = field(default_factory=dict)
     encoder: dict[str, Any] = field(default_factory=dict)
@@ -80,6 +81,10 @@ def load_scene_profile(repo_root: Path, scene_model: str) -> SceneProfile | None
         human_start_pos=_tuple3(human["start_position"], field_name="resident.start_position"),
         robot=dict(data.get("robot") or {}),
         motion_sensors=tuple(_motion_sensor_spec(spec) for spec in data.get("motion_sensors", [])),
+        sensor_layouts={
+            str(name): tuple(_motion_sensor_spec(spec) for spec in specs)
+            for name, specs in (data.get("sensor_layouts") or {}).items()
+        },
         pressure_sensors=tuple(_pressure_sensor_spec(spec) for spec in data.get("pressure_sensors", [])),
         zones=dict(data.get("zones") or {}),
         encoder=dict(data.get("encoder") or {}),

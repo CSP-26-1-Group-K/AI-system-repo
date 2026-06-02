@@ -59,8 +59,15 @@ TORCHDYNAMO_DISABLE=1 /home/user/Desktop/isaac-sim-5.1/python.sh \
   --robot-type R1Pro \
   --hdf5-replay /home/user/Projects/csp-2026-k/delivery_med_room_1_v01.hdf5 \
   --enable-activity-sensors \
+  --sensor-layout current \
   --step-log-hz 2.0
 ```
+
+Sensor layout options:
+
+- `--sensor-layout current`: current deployment layout with added piano-area coverage
+- `--sensor-layout dense`: higher coverage layout with fewer blind spots
+- `--sensor-layout sparse`: reduced sensor layout for low-coverage / dropout-like data
 
 Viewport controls:
 

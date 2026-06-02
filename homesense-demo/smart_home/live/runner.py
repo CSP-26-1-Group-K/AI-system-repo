@@ -309,7 +309,16 @@ class LiveControlledScene:
     def motion_sensor_specs(self):
         if self.args.empty_scene or self.scene_profile is None or not self.scene_profile.motion_sensors:
             return None
-        return [dict(spec) for spec in self.scene_profile.motion_sensors]
+        layout_name = str(getattr(self.args, "sensor_layout", "current") or "current")
+        layouts = self.scene_profile.sensor_layouts or {}
+        if layout_name in layouts:
+            specs = layouts[layout_name]
+        elif layout_name != "current" and "current" in layouts:
+            bridge.log("sensor_layout_fallback", {"requested": layout_name, "selected": "current"})
+            specs = layouts["current"]
+        else:
+            specs = self.scene_profile.motion_sensors
+        return [dict(spec) for spec in specs]
 
     def pressure_sensor_position(self, preset):
         sensor = None if self.scene_profile is None else self.scene_profile.primary_pressure_sensor
@@ -348,6 +357,7 @@ class LiveControlledScene:
                 "resident_zone_mode": self.args.resident_zone,
                 "episode_seed": self.episode_seed,
                 "activity_sensors_enabled": bool(self.args.enable_activity_sensors),
+                "sensor_layout": str(getattr(self.args, "sensor_layout", "current") or "current"),
                 "step_log_hz": float(self.args.step_log_hz),
                 "files": {
                     "events": "events.jsonl",
@@ -1635,21 +1645,40 @@ class LiveControlledScene:
                 if attr:
                     attr.Set(pxr.Gf.Vec3d(*xyz))
 
-        def set_rotate_x(name, deg):
+        def set_rotate(name, axis, deg):
             prim = stage.GetPrimAtPath(f"/World/dummy_human/{name}")
             if not prim or not prim.IsValid():
                 return
-            attr = prim.GetAttribute("xformOp:rotateX")
+            axis = str(axis).upper()
+            attr = prim.GetAttribute(f"xformOp:rotate{axis}")
             if attr:
                 attr.Set(float(deg))
                 return
             try:
-                pxr.UsdGeom.Xformable(prim).AddRotateXOp().Set(float(deg))
+                xform = pxr.UsdGeom.Xformable(prim)
+                if axis == "X":
+                    xform.AddRotateXOp().Set(float(deg))
+                elif axis == "Y":
+                    xform.AddRotateYOp().Set(float(deg))
+                elif axis == "Z":
+                    xform.AddRotateZOp().Set(float(deg))
             except Exception:
                 pass
 
+        def set_rotate_x(name, deg):
+            set_rotate(name, "X", deg)
+
+        def set_rotate_y(name, deg):
+            set_rotate(name, "Y", deg)
+
+        def reset_part_rotations():
+            for part in ("torso", "head", "hair", "left_leg", "right_leg", "left_arm", "right_arm", "left_hand", "right_hand", "left_shoe", "right_shoe"):
+                set_rotate_x(part, 0.0)
+                set_rotate_y(part, 0.0)
+
         def apply_posture():
             if posture == "seated":
+                reset_part_rotations()
                 set_translate("torso", (0.0, 0.0, 0.78))
                 set_translate("head", (0.0, 0.0, 1.16))
                 set_translate("hair", (0.0, -0.02, 1.28))
@@ -1665,8 +1694,67 @@ class LiveControlledScene:
                 set_translate("right_shoe", (0.07, 0.50, 0.24))
                 set_rotate_x("left_shoe", 82.0)
                 set_rotate_x("right_shoe", 82.0)
+            elif posture == "bending":
+                reset_part_rotations()
+                set_translate("torso", (0.0, 0.16, 0.86))
+                set_rotate_x("torso", 54.0)
+                set_translate("head", (0.0, 0.46, 1.06))
+                set_rotate_x("head", 38.0)
+                set_translate("hair", (0.0, 0.42, 1.18))
+                set_rotate_x("hair", 38.0)
+                set_translate("left_leg", (-0.07, 0.0, 0.36))
+                set_translate("right_leg", (0.07, 0.0, 0.36))
+                set_translate("left_arm", (-0.22, 0.36, 0.74))
+                set_translate("right_arm", (0.22, 0.36, 0.74))
+                set_rotate_x("left_arm", 62.0)
+                set_rotate_x("right_arm", 62.0)
+                set_translate("left_hand", (-0.22, 0.58, 0.48))
+                set_translate("right_hand", (0.22, 0.58, 0.48))
+                set_translate("left_shoe", (-0.07, 0.10, 0.04))
+                set_translate("right_shoe", (0.07, 0.10, 0.04))
+            elif posture == "lying":
+                reset_part_rotations()
+                set_translate("torso", (0.0, 0.0, 0.58))
+                set_rotate_x("torso", 90.0)
+                set_translate("head", (0.0, 0.48, 0.58))
+                set_rotate_x("head", 90.0)
+                set_translate("hair", (0.0, 0.58, 0.63))
+                set_rotate_x("hair", 90.0)
+                set_translate("left_leg", (-0.07, -0.52, 0.55))
+                set_translate("right_leg", (0.07, -0.52, 0.55))
+                set_rotate_x("left_leg", 90.0)
+                set_rotate_x("right_leg", 90.0)
+                set_translate("left_arm", (-0.26, 0.02, 0.60))
+                set_translate("right_arm", (0.26, 0.02, 0.60))
+                set_rotate_x("left_arm", 90.0)
+                set_rotate_x("right_arm", 90.0)
+                set_translate("left_hand", (-0.32, 0.36, 0.58))
+                set_translate("right_hand", (0.32, 0.36, 0.58))
+                set_translate("left_shoe", (-0.07, -0.94, 0.54))
+                set_translate("right_shoe", (0.07, -0.94, 0.54))
+                set_rotate_x("left_shoe", 90.0)
+                set_rotate_x("right_shoe", 90.0)
+            elif posture == "piano_reaching":
+                reset_part_rotations()
+                set_translate("torso", (0.0, 0.04, 0.99))
+                set_rotate_x("torso", 8.0)
+                set_translate("head", (0.0, 0.08, 1.42))
+                set_rotate_x("head", 10.0)
+                set_translate("hair", (0.0, 0.05, 1.55))
+                set_rotate_x("hair", 10.0)
+                set_translate("left_leg", (-0.07, 0.0, 0.34))
+                set_translate("right_leg", (0.07, 0.0, 0.34))
+                set_translate("left_arm", (-0.21, 0.28, 1.10))
+                set_translate("right_arm", (0.21, 0.28, 1.10))
+                set_rotate_x("left_arm", 84.0)
+                set_rotate_x("right_arm", 84.0)
+                set_translate("left_hand", (-0.18, 0.66, 0.98))
+                set_translate("right_hand", (0.18, 0.66, 0.98))
+                set_translate("left_shoe", (-0.07, 0.10, 0.04))
+                set_translate("right_shoe", (0.07, 0.10, 0.04))
             else:
                 # Recreate the procedural standing layout used by add_demo_human_avatar(height=1.7).
+                reset_part_rotations()
                 height = 1.7
                 leg_h = height * 0.40
                 torso_h = height * 0.38
@@ -2119,6 +2207,12 @@ def main():
         "--enable-activity-sensors",
         action="store_true",
         help="Enable scene-profile virtual activity sensors for data-generation episodes.",
+    )
+    parser.add_argument(
+        "--sensor-layout",
+        choices=["current", "dense", "sparse"],
+        default="current",
+        help="Scene-profile motion sensor layout variant for data diversity.",
     )
     parser.add_argument(
         "--step-log-hz",
