@@ -51,6 +51,11 @@ def _get_xform_position(xform):
     return th.tensor([value[0], value[1], value[2]], dtype=th.float32)
 
 
+def _get_rotate_z_rad(xform):
+    value = xform.GetPrim().GetAttribute("xformOp:rotateZ").Get()
+    return math.radians(float(value)) if value is not None else None
+
+
 @dataclass
 class MotionSensorReading:
     name: str
@@ -70,13 +75,15 @@ class MotionSensor:
         self.fov_rad = math.radians(fov_deg)
         self.occluders = []
         self.fov_visible = bool(show_fov)
+        self.active = True
 
         root_path = f"/World/smart_home/{name}"
         forward = th.tensor([math.cos(self.yaw_rad), math.sin(self.yaw_rad), 0.0], dtype=th.float32)
         mount_pos = self.position - forward * 0.10
         self.mount = lazy.pxr.UsdGeom.Cube.Define(og.sim.stage, f"{root_path}_wall_mount")
         self.mount.CreateSizeAttr(1.0)
-        _add_xform_ops(self.mount, mount_pos.tolist(), scale=(0.045, 0.18, 0.12), orient_z_rad=self.yaw_rad)
+        self.mount_scale = (0.045, 0.18, 0.12)
+        _add_xform_ops(self.mount, mount_pos.tolist(), scale=self.mount_scale, orient_z_rad=self.yaw_rad)
         _set_display_color(self.mount, (0.9, 0.92, 0.9))
 
         self.marker = lazy.pxr.UsdGeom.Cone.Define(og.sim.stage, root_path)
@@ -86,6 +93,40 @@ class MotionSensor:
         _set_display_color(self.marker, (0.88, 0.92, 0.95))
         self.fov_mesh = self._create_fov_mesh(f"{root_path}_range")
         self.set_fov_visible(show_fov)
+
+    def set_active(self, active, fov_visible=None):
+        self.active = bool(active)
+        _set_visible(self.marker, self.active)
+        _set_visible(self.mount, self.active)
+        if self.active:
+            self.set_fov_visible(self.fov_visible if fov_visible is None else fov_visible)
+        else:
+            self.set_fov_visible(False)
+
+    def sync_from_stage(self):
+        position = _get_xform_position(self.marker)
+        yaw_rad = _get_rotate_z_rad(self.marker)
+        changed = bool(th.norm(position - self.position) > 1e-4)
+        self.position = position
+        if yaw_rad is not None and abs(yaw_rad - self.yaw_rad) > 1e-4:
+            self.yaw_rad = yaw_rad
+            changed = True
+        if changed:
+            forward = th.tensor([math.cos(self.yaw_rad), math.sin(self.yaw_rad), 0.0], dtype=th.float32)
+            mount_pos = self.position - forward * 0.10
+            _add_xform_ops(self.mount, mount_pos.tolist(), scale=self.mount_scale, orient_z_rad=self.yaw_rad)
+            self._refresh_fov_mesh()
+
+    def export_spec(self):
+        self.sync_from_stage()
+        return {
+            "sensor_id": self.name,
+            "zone": self.zone,
+            "position": [round(float(value), 4) for value in self.position.tolist()],
+            "yaw_deg": round(math.degrees(self.yaw_rad), 3),
+            "range_m": round(float(self.range_m), 4),
+            "fov_deg": round(math.degrees(self.fov_rad), 3),
+        }
 
     def set_occluders(self, occluders):
         self.occluders = list(occluders or [])
@@ -151,6 +192,7 @@ class MotionSensor:
                 _set_display_opacity(self.fov_mesh, MOTION_FOV_OPACITY)
                 _set_visible(self.fov_mesh, True)
             else:
+                _set_display_color(self.fov_mesh, (0.75, 0.85, 1.0))
                 _set_display_opacity(self.fov_mesh, 0.0)
                 self._collapse_fov_mesh()
                 _set_visible(self.fov_mesh, False)
@@ -227,6 +269,7 @@ class MotionSensor:
         return any(self._segment_intersects_box_2d(start, end, occluder) for occluder in self.occluders)
 
     def read(self, target_position):
+        self.sync_from_stage()
         target = th.tensor(target_position, dtype=th.float32)
         delta = target - self.position
         horizontal = delta[:2]
@@ -358,8 +401,10 @@ class SmartHomeSensorRig:
                 "fov_deg": motion_fov_deg,
             }
         ]
-        self.motion_sensors = [
-            MotionSensor(
+        self.motion_sensors = []
+        self.motion_sensor_by_name = {}
+        for spec in specs:
+            sensor = MotionSensor(
                 name=spec["name"],
                 zone=spec.get("zone"),
                 position=spec["position"],
@@ -368,8 +413,9 @@ class SmartHomeSensorRig:
                 fov_deg=spec.get("fov_deg", 90.0),
                 show_fov=show_motion_fov,
             )
-            for spec in specs
-        ]
+            self.motion_sensors.append(sensor)
+            self.motion_sensor_by_name[sensor.name] = sensor
+        self.active_motion_sensor_names = [sensor.name for sensor in self.motion_sensors]
         self.motion_fov_visible = bool(show_motion_fov)
         self.pressure_sensor = PressureSensor(
             name=pressure_name,
@@ -382,14 +428,30 @@ class SmartHomeSensorRig:
     def set_motion_fov_visible(self, visible):
         self.motion_fov_visible = bool(visible)
         for sensor in self.motion_sensors:
-            sensor.set_fov_visible(self.motion_fov_visible)
+            sensor.set_fov_visible(self.motion_fov_visible if sensor.name in self.active_motion_sensor_names else False)
+
+    def set_active_motion_sensors(self, names):
+        requested = [str(name) for name in names or []]
+        active = [name for name in requested if name in self.motion_sensor_by_name]
+        if not active:
+            active = [sensor.name for sensor in self.motion_sensors]
+        self.active_motion_sensor_names = active
+        active_set = set(active)
+        for sensor in self.motion_sensors:
+            sensor.set_active(sensor.name in active_set, self.motion_fov_visible)
+        return list(self.active_motion_sensor_names)
+
+    def export_active_motion_sensor_specs(self):
+        active = set(self.active_motion_sensor_names)
+        return [sensor.export_spec() for sensor in self.motion_sensors if sensor.name in active]
 
     def set_motion_occluders(self, occluders):
         for sensor in self.motion_sensors:
             sensor.set_occluders(occluders)
 
     def read(self, resident_position, weighted_positions=()):
-        motion_readings = [sensor.read(resident_position) for sensor in self.motion_sensors]
+        active = set(self.active_motion_sensor_names)
+        motion_readings = [sensor.read(resident_position) for sensor in self.motion_sensors if sensor.name in active]
         pressure = self.pressure_sensor.read(weighted_positions)
         return {
             "motion_sensors": {

@@ -15,7 +15,7 @@ VIEWPORT_ROTATION_STEP_DEG = 15.0
 VIEWPORT_CAMERA_KEYS = {
     "KEY_1": "overview",
     "KEY_2": "resident",
-    "KEY_3": "robot",
+    "KEY_3": "free",
 }
 
 OBSTACLE_MIN_HEIGHT_M = 0.16

@@ -10,6 +10,8 @@ import threading
 from pathlib import Path
 from time import time
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -94,7 +96,9 @@ class LiveControlledScene:
         self.scene_bounds = None
         self.collision_obstacles = []
         self.sensor_ranges_visible = False
-        self.viewport_camera_modes = ("overview", "resident", "robot")
+        self.sensor_visual_flush_frames = 0
+        self.sensor_layout = str(getattr(args, "sensor_layout", "current") or "current")
+        self.viewport_camera_modes = ("overview", "resident", "free")
         self.viewport_input_active = False
         self.viewport_input_expires_t = 0.0
         self.viewport_input_vector = (0.0, 0.0, 0.0)
@@ -292,9 +296,9 @@ class LiveControlledScene:
                 show_pressure_visual=False,
             )
             self.sensor_rig.set_motion_occluders(self.sensor_wall_occluders())
+            bridge.log("sensor_layout_selected", self.apply_sensor_layout(self.sensor_layout))
             bridge.log("pressure_sensor_visual_disabled", {"reason": "avoid overlapping Merom laundry geometry"})
         self.set_camera("overview")
-        self.enable_default_viewer_camera_controls()
         self.attach_bridge()
         self.configure_keyboard()
         self.create_viewport_hud()
@@ -309,16 +313,69 @@ class LiveControlledScene:
     def motion_sensor_specs(self):
         if self.args.empty_scene or self.scene_profile is None or not self.scene_profile.motion_sensors:
             return None
-        layout_name = str(getattr(self.args, "sensor_layout", "current") or "current")
-        layouts = self.scene_profile.sensor_layouts or {}
-        if layout_name in layouts:
-            specs = layouts[layout_name]
-        elif layout_name != "current" and "current" in layouts:
-            bridge.log("sensor_layout_fallback", {"requested": layout_name, "selected": "current"})
-            specs = layouts["current"]
-        else:
-            specs = self.scene_profile.motion_sensors
-        return [dict(spec) for spec in specs]
+        specs_by_name = {}
+        for specs in self.available_sensor_layouts().values():
+            for spec in specs:
+                specs_by_name.setdefault(str(spec["name"]), dict(spec))
+        if not specs_by_name:
+            for spec in self.scene_profile.motion_sensors:
+                specs_by_name.setdefault(str(spec["name"]), dict(spec))
+        return list(specs_by_name.values())
+
+    def available_sensor_layouts(self):
+        if self.args.empty_scene or self.scene_profile is None:
+            return {}
+        layouts = {
+            str(name): tuple(dict(spec) for spec in specs)
+            for name, specs in (self.scene_profile.sensor_layouts or {}).items()
+        }
+        if "current" not in layouts and self.scene_profile.motion_sensors:
+            layouts["current"] = tuple(dict(spec) for spec in self.scene_profile.motion_sensors)
+        return layouts
+
+    def ordered_sensor_layout_names(self):
+        layouts = self.available_sensor_layouts()
+        preferred = [name for name in ("current", "dense", "sparse") if name in layouts]
+        return preferred + sorted(name for name in layouts if name not in preferred)
+
+    def active_sensor_names_for_layout(self, layout_name):
+        layouts = self.available_sensor_layouts()
+        selected = str(layout_name or "current")
+        if selected not in layouts:
+            fallback = "current" if "current" in layouts else next(iter(layouts), None)
+            if fallback is not None:
+                bridge.log("sensor_layout_fallback", {"requested": selected, "selected": fallback})
+                selected = fallback
+        specs = layouts.get(selected, ())
+        return selected, [str(spec["name"]) for spec in specs]
+
+    def apply_sensor_layout(self, layout_name):
+        selected, sensor_names = self.active_sensor_names_for_layout(layout_name)
+        self.sensor_layout = selected
+        active = []
+        if self.sensor_rig is not None:
+            active = self.sensor_rig.set_active_motion_sensors(sensor_names)
+            self.sensor_rig.set_motion_fov_visible(self.sensor_ranges_visible)
+        return {
+            "event": "sensor_layout_selected",
+            "sensor_layout": self.sensor_layout,
+            "active_motion_sensor_count": len(active),
+            "active_motion_sensors": active,
+            "available_sensor_layouts": self.ordered_sensor_layout_names(),
+        }
+
+    def cycle_sensor_layout(self):
+        names = self.ordered_sensor_layout_names()
+        if not names:
+            return {"event": "sensor_layout_unavailable"}
+        try:
+            idx = names.index(self.sensor_layout)
+        except ValueError:
+            idx = -1
+        result = self.apply_sensor_layout(names[(idx + 1) % len(names)])
+        if self.episode_id > 0:
+            self.episode_logger.write("sensor_layout_changed", self.episode_payload(event_reason=f"sensor_layout_{self.sensor_layout}"))
+        return result
 
     def pressure_sensor_position(self, preset):
         sensor = None if self.scene_profile is None else self.scene_profile.primary_pressure_sensor
@@ -357,7 +414,8 @@ class LiveControlledScene:
                 "resident_zone_mode": self.args.resident_zone,
                 "episode_seed": self.episode_seed,
                 "activity_sensors_enabled": bool(self.args.enable_activity_sensors),
-                "sensor_layout": str(getattr(self.args, "sensor_layout", "current") or "current"),
+                "initial_sensor_layout": self.sensor_layout,
+                "available_sensor_layouts": self.ordered_sensor_layout_names(),
                 "step_log_hz": float(self.args.step_log_hz),
                 "files": {
                     "events": "events.jsonl",
@@ -720,7 +778,15 @@ class LiveControlledScene:
                 if self.sensor_rig is not None:
                     with og.sim.editing_usd():
                         self.sensor_rig.set_motion_fov_visible(self.sensor_ranges_visible)
+                if not self.sensor_ranges_visible:
+                    self.sensor_visual_flush_frames = 3
                 result = {"event": "set_sensor_ranges_visible", "visible": self.sensor_ranges_visible}
+            elif command == "cycle_sensor_layout":
+                with og.sim.editing_usd():
+                    result = self.cycle_sensor_layout()
+            elif command == "export_sensor_layout":
+                with og.sim.editing_usd():
+                    result = self.export_sensor_layout()
             else:
                 result = {"event": "unknown_command", "command": command}
             bridge.log(result.get("event", command), result)
@@ -772,6 +838,12 @@ class LiveControlledScene:
         key = getattr(lazy.carb.input.KeyboardInput, "F", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, self.queue_toggle_sensor_ranges)
+        key = getattr(lazy.carb.input.KeyboardInput, "L", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_cycle_sensor_layout)
+        key = getattr(lazy.carb.input.KeyboardInput, "K", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_export_sensor_layout)
         key = getattr(lazy.carb.input.KeyboardInput, "R", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, self.queue_reset_scene)
@@ -791,11 +863,13 @@ class LiveControlledScene:
             "\nHomeSense viewport controls\n"
             "  1: Top overview camera\n"
             "  2: Resident follow camera\n"
-            "  3: Robot follow camera\n"
+            "  3: Free viewer camera\n"
             "  C: Cycle camera mode\n"
             "  W/A/S/D or arrow keys: Move resident in overview; move relative to resident in resident follow\n"
             "  Q/E: Rotate resident in resident follow\n"
             "  F: Toggle motion sensor ranges\n"
+            "  L: Cycle sensor layout (current / dense / sparse)\n"
+            "  K: Export active sensor layout after viewport edits\n"
             "  N: Start a randomized data-collection episode\n"
             "  T/Y: Trigger deliver-item / laundry replay placeholder\n"
             "  R: Reset scene\n"
@@ -856,7 +930,7 @@ class LiveControlledScene:
         values = {
             "episode": f"Episode: {self.episode_id} / zone={self.episode_zone}",
             "zone": f"Resident: {self.state.human.zone} pos={self._short_vec(self.state.human.position)}",
-            "motion": f"Motion: {self.state.motion.active_sensor_id or '--'} detected={self.state.motion.detected}",
+            "motion": f"Motion: {self.state.motion.active_sensor_id or '--'} detected={self.state.motion.detected} layout={self.sensor_layout}",
             "activity": f"Activity: {self.activity_state.activity_id or '--'} confidence={confidence_text}",
             "virtual": f"Virtual sensors: {virtual_summary}",
             "task": f"Robot task: {self.state.robot.task or '--'} status={self.state.robot.status}",
@@ -970,6 +1044,35 @@ class LiveControlledScene:
 
     def queue_toggle_sensor_ranges(self):
         return self.queue_set_sensor_ranges_visible(not self.sensor_ranges_visible)
+
+    def queue_cycle_sensor_layout(self):
+        self.command_queue.put(("cycle_sensor_layout", ()))
+        return {"event": "cycle_sensor_layout_queued"}
+
+    def queue_export_sensor_layout(self):
+        self.command_queue.put(("export_sensor_layout", ()))
+        return {"event": "export_sensor_layout_queued"}
+
+    def export_sensor_layout(self):
+        if self.sensor_rig is None:
+            return {"event": "sensor_layout_export_failed", "reason": "sensor rig is not initialized"}
+        specs = self.sensor_rig.export_active_motion_sensor_specs()
+        export_dir = REPO_ROOT / "logs" / "sensor_layout_exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        stamp = utc_now_iso().replace(":", "").replace("-", "").replace(".", "")
+        path = export_dir / f"{stamp}_{self.sensor_layout}.yaml"
+        payload = {
+            "scene_model": self.scene_profile.scene_model if self.scene_profile else self.args.scene_model,
+            "sensor_layout": self.sensor_layout,
+            "motion_sensors": specs,
+        }
+        path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        return {
+            "event": "sensor_layout_exported",
+            "sensor_layout": self.sensor_layout,
+            "active_motion_sensor_count": len(specs),
+            "path": str(path),
+        }
 
     def move_human_delta(self, dx, dy, dz=0.0, face_movement=True):
         if self.state.robot.busy:
@@ -1724,34 +1827,38 @@ class LiveControlledScene:
                 set_translate("right_leg", (0.07, -0.52, 0.55))
                 set_rotate_x("left_leg", 90.0)
                 set_rotate_x("right_leg", 90.0)
-                set_translate("left_arm", (-0.26, 0.02, 0.60))
-                set_translate("right_arm", (0.26, 0.02, 0.60))
+                set_translate("left_arm", (-0.34, -0.10, 0.58))
+                set_translate("right_arm", (0.34, -0.10, 0.58))
                 set_rotate_x("left_arm", 90.0)
                 set_rotate_x("right_arm", 90.0)
-                set_translate("left_hand", (-0.32, 0.36, 0.58))
-                set_translate("right_hand", (0.32, 0.36, 0.58))
+                set_translate("left_hand", (-0.36, -0.42, 0.56))
+                set_translate("right_hand", (0.36, -0.42, 0.56))
                 set_translate("left_shoe", (-0.07, -0.94, 0.54))
                 set_translate("right_shoe", (0.07, -0.94, 0.54))
                 set_rotate_x("left_shoe", 90.0)
                 set_rotate_x("right_shoe", 90.0)
             elif posture == "piano_reaching":
                 reset_part_rotations()
-                set_translate("torso", (0.0, 0.04, 0.99))
-                set_rotate_x("torso", 8.0)
-                set_translate("head", (0.0, 0.08, 1.42))
-                set_rotate_x("head", 10.0)
-                set_translate("hair", (0.0, 0.05, 1.55))
-                set_rotate_x("hair", 10.0)
-                set_translate("left_leg", (-0.07, 0.0, 0.34))
-                set_translate("right_leg", (0.07, 0.0, 0.34))
-                set_translate("left_arm", (-0.21, 0.28, 1.10))
-                set_translate("right_arm", (0.21, 0.28, 1.10))
-                set_rotate_x("left_arm", 84.0)
-                set_rotate_x("right_arm", 84.0)
-                set_translate("left_hand", (-0.18, 0.66, 0.98))
-                set_translate("right_hand", (0.18, 0.66, 0.98))
-                set_translate("left_shoe", (-0.07, 0.10, 0.04))
-                set_translate("right_shoe", (0.07, 0.10, 0.04))
+                set_translate("torso", (0.0, 0.04, 0.76))
+                set_rotate_x("torso", 12.0)
+                set_translate("head", (0.0, 0.09, 1.17))
+                set_rotate_x("head", 8.0)
+                set_translate("hair", (0.0, 0.06, 1.30))
+                set_rotate_x("hair", 8.0)
+                set_translate("left_leg", (-0.08, 0.18, 0.40))
+                set_translate("right_leg", (0.08, 0.18, 0.40))
+                set_rotate_x("left_leg", 82.0)
+                set_rotate_x("right_leg", 82.0)
+                set_translate("left_arm", (-0.22, 0.26, 0.82))
+                set_translate("right_arm", (0.22, 0.26, 0.82))
+                set_rotate_x("left_arm", 78.0)
+                set_rotate_x("right_arm", 78.0)
+                set_translate("left_hand", (-0.18, 0.56, 0.72))
+                set_translate("right_hand", (0.18, 0.56, 0.72))
+                set_translate("left_shoe", (-0.08, 0.50, 0.22))
+                set_translate("right_shoe", (0.08, 0.50, 0.22))
+                set_rotate_x("left_shoe", 82.0)
+                set_rotate_x("right_shoe", 82.0)
             else:
                 # Recreate the procedural standing layout used by add_demo_human_avatar(height=1.7).
                 reset_part_rotations()
@@ -1887,13 +1994,13 @@ class LiveControlledScene:
         return pose
 
     def set_camera(self, mode):
-        if mode == "robot" and self.robot_replay_active:
+        if mode == "free":
             pose = self.restore_default_viewer_camera()
             self.state.camera_mode = mode
             self.mark_ceiling_visibility_dirty()
             return {
                 "mode": mode,
-                "camera": "omnigibson_default_viewer",
+                "camera": "omnigibson_default_viewer_free",
                 "position": None if pose is None else pose["position"],
                 "orientation_xyzw": None if pose is None else pose["orientation_xyzw"],
             }
@@ -1904,9 +2011,7 @@ class LiveControlledScene:
         return {"mode": mode, "position": position, "look_at": look_at}
 
     def update_follow_camera(self, now):
-        if self.video_source != "viewer" or self.state.camera_mode not in {"robot", "resident"}:
-            return
-        if self.state.camera_mode == "robot" and self.robot_replay_active:
+        if self.video_source != "viewer" or self.state.camera_mode != "resident":
             return
         if now - self.last_follow_camera_t < self.follow_camera_interval_s:
             return
@@ -2081,6 +2186,7 @@ class LiveControlledScene:
             "virtual_sensors": dict(self.activity_state.virtual_sensors),
             "ground_truth_resident_zone": self.ground_truth_resident_zone(),
             "scenario_type": self.episode_scenario_type or self.infer_scenario_type(),
+            "sensor_layout": self.sensor_layout,
         }
 
     def snapshot(self):
@@ -2093,6 +2199,13 @@ class LiveControlledScene:
         }
         data["sensor_visualization"] = {
             "motion_ranges_visible": bool(self.sensor_ranges_visible),
+        }
+        data["sensor_layout"] = {
+            "active": self.sensor_layout,
+            "available": self.ordered_sensor_layout_names(),
+            "active_motion_sensors": list(getattr(self.sensor_rig, "active_motion_sensor_names", []))
+            if self.sensor_rig is not None
+            else [],
         }
         data["activity_context"] = {
             "enabled": bool(self.activity_state.enabled),
@@ -2134,6 +2247,7 @@ class LiveControlledScene:
                 "robot": data.get("robot"),
                 "robot_pose": data.get("robot_pose"),
                 "camera_mode": data.get("camera_mode"),
+                "sensor_layout": data.get("sensor_layout"),
                 "activity_context": data.get("activity_context"),
                 "ground_truth": data.get("ground_truth"),
                 "estimates": data.get("estimates"),
@@ -2143,6 +2257,16 @@ class LiveControlledScene:
                 "metrics": dict(self.episode_metrics),
             }
         )
+
+    def flush_sensor_visual_history(self):
+        if self.sensor_visual_flush_frames <= 0:
+            return
+        self.sensor_visual_flush_frames -= 1
+        try:
+            og.sim.render()
+        except Exception as exc:
+            self.sensor_visual_flush_frames = 0
+            bridge.log("sensor_visual_flush_failed", {"reason": str(exc)})
 
     def run(self):
         frame = 0
@@ -2163,6 +2287,7 @@ class LiveControlledScene:
                     bridge.log(visibility_result["event"], visibility_result)
             self.update_follow_camera(now)
             self.update_viewport_hud(now)
+            self.flush_sensor_visual_history()
             self.capture_video_frame(now)
             frame += 1
             self.env.step(action=self.next_robot_action())

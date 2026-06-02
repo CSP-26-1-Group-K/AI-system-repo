@@ -68,6 +68,7 @@ Sensor layout options:
 - `--sensor-layout current`: current deployment layout with added piano-area coverage
 - `--sensor-layout dense`: higher coverage layout with fewer blind spots
 - `--sensor-layout sparse`: reduced sensor layout for low-coverage / dropout-like data
+- While OmniGibson is running, press `L` to cycle `current -> dense -> sparse`.
 
 Viewport controls:
 
@@ -75,8 +76,10 @@ Viewport controls:
 - `T`: run the delivery replay task
 - `1`: top overview camera
 - `2`: resident follow camera
-- `3`: robot/replay camera
+- `3`: free viewer camera
 - `F`: toggle motion sensor range visualization
+- `L`: cycle the active motion sensor layout
+- `K`: export the active sensor layout after moving sensor prims in the OmniGibson viewport
 - `W/A/S/D`: move resident when movement is enabled
 - `Q/E`: rotate resident in resident-follow mode
 

@@ -167,6 +167,13 @@ sensor_layouts:
       yaw_deg: 0.0
       range_m: 1.25
       fov_deg: 360.0
+    - sensor_id: motion_living_countertop_piano_wall
+      zone: living_room
+      placement: wall/countertop-side sensor looking from the countertop area toward the piano corner
+      position: [-1.18, 8.36, 1.42]
+      yaw_deg: -70.0
+      range_m: 2.30
+      fov_deg: 76.0
     - sensor_id: motion_bath_left_wall
       zone: bathroom
       placement: left wall after bathroom entrance, looking right across the room
@@ -204,126 +211,147 @@ sensor_layouts:
       fov_deg: 360.0
 
   dense:
-    - sensor_id: motion_entry_door_wall
+    - sensor_id: dense_entry_ceiling
       zone: entry_living
-      placement: ceiling directly in front of the entrance door, downward wide coverage
-      position: [3.37, 9.74, 2.58]
-      yaw_deg: 0.0
-      range_m: 1.55
-      fov_deg: 360.0
-    - sensor_id: motion_living_tv_console
-      zone: living_room
-      placement: between TV screen and shelf, looking toward the sofa without piercing the TV
-      position: [4.50, 9.03, 0.95]
-      yaw_deg: 180.0
-      range_m: 2.65
-      fov_deg: 62.0
-    - sensor_id: motion_living_coffee_ceiling
-      zone: living_room
-      placement: ceiling above coffee table, downward/wide coverage
-      position: [4.04, 7.43, 2.35]
-      yaw_deg: 0.0
-      range_m: 2.0
-      fov_deg: 360.0
-    - sensor_id: motion_living_piano_ceiling
-      zone: living_room
-      placement: ceiling coverage over the piano side of the living room
-      position: [2.00, 7.05, 2.35]
-      yaw_deg: 0.0
-      range_m: 1.25
-      fov_deg: 360.0
-    - sensor_id: motion_living_piano_wall
-      zone: living_room
-      placement: wall sensor looking across the piano and open floor area
-      position: [1.45, 6.35, 1.45]
-      yaw_deg: 40.0
-      range_m: 1.75
-      fov_deg: 72.0
-    - sensor_id: motion_living_entry_transition
-      zone: living_room
-      placement: ceiling coverage at the living-entry transition corridor
-      position: [2.70, 8.15, 2.35]
+      placement: dense independent ceiling coverage near the entrance door
+      position: [3.22, 9.55, 2.58]
       yaw_deg: 0.0
       range_m: 1.35
       fov_deg: 360.0
-    - sensor_id: motion_bath_left_wall
-      zone: bathroom
-      placement: left wall after bathroom entrance, looking right across the room
-      position: [3.12, 5.25, 1.55]
+    - sensor_id: dense_entry_living_transition
+      zone: living_room
+      placement: dense transition coverage between entrance and living seating area
+      position: [2.55, 8.35, 2.35]
       yaw_deg: 0.0
-      range_m: 1.95
-      fov_deg: 76.0
-    - sensor_id: motion_bedroom_entry_wall
-      zone: bedroom
-      placement: provisional bedroom entry wall coverage
-      position: [4.65, 1.55, 1.65]
-      yaw_deg: 165.0
-      range_m: 2.5
-      fov_deg: 82.0
-    - sensor_id: motion_bedroom_sofa_wall
-      zone: bedroom
-      placement: deeper bedroom wall coverage toward the sofa corner
-      position: [4.90, 0.20, 1.60]
-      yaw_deg: -112.0
-      range_m: 2.0
-      fov_deg: 76.0
-    - sensor_id: motion_bedroom_bed_ceiling
-      zone: bedroom
-      placement: ceiling coverage over bed area for lying/resting contexts
-      position: [3.35, 1.35, 2.35]
+      range_m: 1.30
+      fov_deg: 360.0
+    - sensor_id: dense_living_sofa_ceiling
+      zone: living_room
+      placement: dense ceiling coverage over sofa seating
+      position: [2.25, 9.05, 2.35]
       yaw_deg: 0.0
       range_m: 1.25
       fov_deg: 360.0
-    - sensor_id: motion_utility_table_ceiling
-      zone: utility_room
-      placement: ceiling coverage over the empty left utility area, intentionally separated from laundry coverage
-      position: [-1.75, 0.25, 2.35]
+    - sensor_id: dense_living_coffee_ceiling
+      zone: living_room
+      placement: dense ceiling coverage over coffee-table walking area
+      position: [4.15, 7.60, 2.35]
       yaw_deg: 0.0
-      range_m: 0.85
+      range_m: 1.35
       fov_deg: 360.0
-    - sensor_id: motion_utility_laundry_ceiling
-      zone: utility_room
-      placement: ceiling coverage above washer and dryer side, intentionally separated from left utility coverage
-      position: [0.20, -1.10, 2.35]
+    - sensor_id: dense_living_tv_wall
+      zone: living_room
+      placement: dense wall sensor below TV shelf looking toward sofa
+      position: [4.58, 9.10, 1.20]
+      yaw_deg: 180.0
+      range_m: 2.25
+      fov_deg: 66.0
+    - sensor_id: dense_living_countertop_ceiling
+      zone: living_room
+      placement: dense ceiling coverage above the countertop and piano-side approach
+      position: [-1.18, 8.36, 2.35]
       yaw_deg: 0.0
-      range_m: 0.85
+      range_m: 1.25
       fov_deg: 360.0
+    - sensor_id: dense_living_countertop_piano_wall
+      zone: living_room
+      placement: dense wall sensor from the countertop side looking toward the piano
+      position: [-1.20, 8.37, 1.42]
+      yaw_deg: -70.0
+      range_m: 2.40
+      fov_deg: 78.0
+    - sensor_id: dense_living_piano_keyboard_wall
+      zone: living_room
+      placement: dense side sensor looking along the piano keyboard and open floor
+      position: [0.95, 6.30, 1.35]
+      yaw_deg: 45.0
+      range_m: 1.80
+      fov_deg: 72.0
+    - sensor_id: dense_bath_entry_wall
+      zone: bathroom
+      placement: dense wall sensor at bathroom entrance looking inward
+      position: [3.05, 5.05, 1.50]
+      yaw_deg: 20.0
+      range_m: 1.65
+      fov_deg: 74.0
+    - sensor_id: dense_bath_shower_side
+      zone: bathroom
+      placement: dense side coverage around shower and sink approach
+      position: [4.35, 5.45, 1.55]
+      yaw_deg: 180.0
+      range_m: 1.35
+      fov_deg: 72.0
+    - sensor_id: dense_bedroom_bed_ceiling
+      zone: bedroom
+      placement: dense ceiling coverage above bed and lying context
+      position: [3.20, 1.40, 2.35]
+      yaw_deg: 0.0
+      range_m: 1.35
+      fov_deg: 360.0
+    - sensor_id: dense_bedroom_sofa_wall
+      zone: bedroom
+      placement: dense wall coverage toward bedroom sofa and cabinet corner
+      position: [4.98, 0.45, 1.55]
+      yaw_deg: -125.0
+      range_m: 1.75
+      fov_deg: 76.0
+    - sensor_id: dense_bedroom_entry_ceiling
+      zone: bedroom
+      placement: dense ceiling coverage near bedroom entrance
+      position: [4.65, 2.10, 2.35]
+      yaw_deg: 0.0
+      range_m: 1.20
+      fov_deg: 360.0
+    - sensor_id: dense_utility_left_ceiling
+      zone: utility_room
+      placement: dense ceiling coverage over left utility open area
+      position: [-1.65, 0.35, 2.35]
+      yaw_deg: 0.0
+      range_m: 0.90
+      fov_deg: 360.0
+    - sensor_id: dense_utility_laundry_ceiling
+      zone: utility_room
+      placement: dense ceiling coverage over washer and dryer
+      position: [0.35, -1.00, 2.35]
+      yaw_deg: 0.0
+      range_m: 0.90
+      fov_deg: 360.0
+    - sensor_id: dense_utility_door_wall
+      zone: utility_room
+      placement: dense wall sensor covering utility-room doorway
+      position: [-0.60, 1.25, 1.45]
+      yaw_deg: -90.0
+      range_m: 1.45
+      fov_deg: 70.0
 
   sparse:
-    - sensor_id: motion_entry_door_wall
-      zone: entry_living
-      placement: sparse entry coverage
-      position: [3.37, 9.74, 2.58]
-      yaw_deg: 0.0
-      range_m: 1.55
-      fov_deg: 360.0
-    - sensor_id: motion_living_coffee_ceiling
+    - sensor_id: sparse_tv_to_sofa
       zone: living_room
-      placement: sparse main living-room coverage
-      position: [4.04, 7.43, 2.35]
-      yaw_deg: 0.0
-      range_m: 2.0
-      fov_deg: 360.0
-    - sensor_id: motion_bath_left_wall
-      zone: bathroom
-      placement: sparse bathroom coverage
-      position: [3.12, 5.25, 1.55]
-      yaw_deg: 0.0
-      range_m: 1.95
-      fov_deg: 76.0
-    - sensor_id: motion_bedroom_entry_wall
+      placement: sparse TV-side wall sensor looking toward the sofa
+      position: [4.45, 8.90, 1.20]
+      yaw_deg: 180.0
+      range_m: 2.10
+      fov_deg: 58.0
+    - sensor_id: sparse_bed_sensor
       zone: bedroom
-      placement: sparse bedroom coverage
-      position: [4.65, 1.55, 1.65]
-      yaw_deg: 165.0
-      range_m: 2.5
-      fov_deg: 82.0
-    - sensor_id: motion_utility_laundry_ceiling
+      placement: sparse bedroom sensor watching the bed area
+      position: [3.35, 1.38, 2.35]
+      yaw_deg: 0.0
+      range_m: 1.35
+      fov_deg: 360.0
+    - sensor_id: sparse_countertop_to_piano
+      zone: living_room
+      placement: sparse countertop-side sensor looking toward the piano
+      position: [-1.20, 8.37, 1.42]
+      yaw_deg: -70.0
+      range_m: 2.35
+      fov_deg: 78.0
+    - sensor_id: sparse_laundry_ceiling
       zone: utility_room
-      placement: sparse utility room coverage
+      placement: sparse utility-room ceiling sensor watching in front of washer
       position: [0.20, -1.10, 2.35]
       yaw_deg: 0.0
-      range_m: 0.85
+      range_m: 0.80
       fov_deg: 360.0
 
 pressure_sensors:
@@ -388,9 +416,10 @@ activity_profiles:
       weight: 0.20
       confidence: 0.82
       spawn_points:
-        - [2.05, 6.68, 0.0]
-        - [2.28, 6.76, 0.0]
-      heading_deg: 0.0
+        - [-1.89, 5.91, 0.0]
+        - [-1.92, 5.88, 0.0]
+      spawn_collision_check: false
+      heading_deg: 90.0
       posture: piano_reaching
       movement_enabled: false
       sensors:
@@ -400,27 +429,47 @@ activity_profiles:
 
   bathroom:
     - activity_id: showering
-      weight: 0.7
+      weight: 0.34
       confidence: 0.9
       spawn_points:
-        - [3.18, 5.48, 0.0]
+        - [4.67, 5.67, 0.0]
+        - [4.55, 5.67, 0.0]
       heading_deg: 90.0
+      movement_enabled: false
       sensors:
         bathroom_floor_mat: occupied
         shower_flow: on
         bathroom_humidity_pct: 78
         bathroom_light: on
-    - activity_id: bathroom_visit
-      weight: 0.3
-      confidence: 0.8
+    - activity_id: toilet_use
+      weight: 0.33
+      confidence: 0.82
       spawn_points:
-        - [2.92, 5.18, 0.0]
-        - [3.10, 5.25, 0.0]
+        - [3.43, 4.42, 0.0]
+        - [3.43, 4.48, 0.0]
+      spawn_collision_check: false
       heading_deg: 0.0
+      posture: seated
+      movement_enabled: false
       sensors:
         bathroom_floor_mat: occupied
+        toilet_pressure: occupied
         shower_flow: off
-        bathroom_humidity_pct: 48
+        bathroom_humidity_pct: 50
+        bathroom_light: on
+    - activity_id: sink_use
+      weight: 0.33
+      confidence: 0.80
+      spawn_points:
+        - [3.18, 5.20, 0.0]
+        - [3.35, 5.18, 0.0]
+      heading_deg: -90.0
+      movement_enabled: false
+      sensors:
+        bathroom_floor_mat: occupied
+        sink_flow: recently_on
+        shower_flow: off
+        bathroom_humidity_pct: 46
         bathroom_light: on
 
   bedroom:
@@ -439,10 +488,10 @@ activity_profiles:
       weight: 0.35
       confidence: 0.90
       spawn_points:
-        - [3.35, 1.35, 0.0]
-        - [3.10, 1.65, 0.0]
+        - [4.54, 1.22, 0.0]
+        - [4.44, 1.22, 0.0]
       spawn_collision_check: false
-      heading_deg: 90.0
+      heading_deg: 0.0
       posture: lying
       movement_enabled: false
       sensors:
@@ -474,22 +523,8 @@ activity_profiles:
         washing_machine_state: running
         laundry_weight_kg: 7.2
         utility_light: on
-    - activity_id: loading_washer
-      weight: 0.30
-      confidence: 0.86
-      spawn_points:
-        - [0.20, -1.10, 0.0]
-        - [-0.10, -1.05, 0.0]
-      heading_deg: 90.0
-      posture: bending
-      movement_enabled: false
-      sensors:
-        utility_floor_mat: occupied
-        washing_machine_state: open
-        laundry_weight_kg: 3.8
-        utility_light: on
     - activity_id: checking_laundry
-      weight: 0.20
+      weight: 0.50
       confidence: 0.78
       spawn_points:
         - [0.20, -1.10, 0.0]
