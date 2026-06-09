@@ -53,6 +53,12 @@ behavior-1k-assets/
 logs/
 *.jsonl
 
+# Generated episode camera frames
+**/logs/homesense_episodes/**/cameras/
+**/cameras/robot/**/*.jpg
+**/cameras/top/**/*.jpg
+episode_*_frame_*.jpg
+
 # Root-level working copies mirrored into docs/
 /PROJECT_STATUS.md
 /4A_Implementation_Detail_Draft.md

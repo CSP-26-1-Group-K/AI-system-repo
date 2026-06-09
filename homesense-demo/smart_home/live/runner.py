@@ -5,6 +5,7 @@ import json
 import math
 import queue
 import random
+import re
 import sys
 import threading
 from pathlib import Path
@@ -53,7 +54,7 @@ from smart_home.live.constants import (
     OBSTACLE_PATH_PREFIX,
 )
 from smart_home.episode_logging import EpisodeJsonlLogger, utc_now_iso
-from smart_home.live.media import rgb_obs_to_jpeg, zero_action_like
+from smart_home.live.media import rgb_obs_to_jpeg, write_rgb_obs_jpeg, zero_action_like
 from smart_home.replay import ReplayRegistry, ReplaySelectionError
 from smart_home.scene_profile import load_scene_profile
 from smart_home.sensors import SmartHomeSensorRig
@@ -81,11 +82,19 @@ class LiveControlledScene:
         self.video_source = "viewer"
         self.video_frame_interval_s = 1.0 / max(float(getattr(args, "video_fps", 10.0)), 1.0)
         self.last_video_frame_t = 0.0
+        self.camera_log_enabled = bool(getattr(args, "save_camera_frames", False))
+        self.camera_log_interval_s = 1.0 / max(float(getattr(args, "camera_log_fps", 2.0)), 0.001)
+        self.last_camera_log_t = 0.0
+        self.camera_frame_seq = 0
+        self.camera_log_sources = self.parse_camera_log_sources(getattr(args, "camera_log_sources", "robot"))
+        self.camera_frame_counts = {source: 0 for source in ("top", "robot")}
+        self.camera_frame_missing_counts = {source: 0 for source in ("top", "robot")}
         self.follow_camera_interval_s = 0.10
         self.last_follow_camera_t = 0.0
         self.default_viewer_camera_pose = None
         self.viewer_camera_mover = None
         self.robot_rgb_sensor = None
+        self.robot_rgb_sensors = {}
         self.ceiling_prims = []
         self.ceiling_hidden = False
         self.ceiling_visibility_dirty = False
@@ -127,6 +136,32 @@ class LiveControlledScene:
         self.hdf5_replay_id = None
         self.robot_replay_active = False
         self.robot_replay_step = 0
+        self.last_robot_action_record = {
+            "source": "zero",
+            "step": None,
+            "vector": None,
+            "controller": None,
+            "normalized": None,
+        }
+
+    @staticmethod
+    def parse_camera_log_sources(value):
+        value = str(value or "robot").strip().lower()
+        if value == "all":
+            return ("top", "robot")
+        sources = []
+        for item in value.split(","):
+            item = item.strip()
+            if item in {"top", "robot"} and item not in sources:
+                sources.append(item)
+        return tuple(sources or ["robot"])
+
+    @staticmethod
+    def safe_camera_name(value, fallback="camera"):
+        name = str(value or fallback).strip()
+        name = name.split("/")[-1]
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._-")
+        return name or fallback
 
     def setup(self):
         preset = PRESETS[self.args.preset]
@@ -240,7 +275,16 @@ class LiveControlledScene:
         self.add_scene_profile_objects()
         self.sync_hdf5_replay_object_poses("scene_initialization")
         self.sync_hdf5_replay_robot_state("scene_initialization")
-        self.robot_rgb_sensor = self._find_robot_rgb_sensor()
+        self.robot_rgb_sensors = self._find_robot_rgb_sensors()
+        self.robot_rgb_sensor = next(iter(self.robot_rgb_sensors.values()), None)
+        bridge.log(
+            "robot_rgb_sensors_discovered",
+            {
+                "count": len(self.robot_rgb_sensors),
+                "names": list(self.robot_rgb_sensors),
+                "primary": next(iter(self.robot_rgb_sensors), None),
+            },
+        )
         self.zero_action = zero_action_like(self.env.action_space.sample()) if self.env.action_space is not None else []
         bridge.log("robot_initial_pose", self.current_robot_pose() or {"available": False})
 
@@ -395,6 +439,9 @@ class LiveControlledScene:
         return {
             "min_robot_resident_distance_m": None,
             "frame_count": 0,
+            "camera_sample_count": 0,
+            "camera_frame_counts": {"top": 0, "robot": 0},
+            "camera_frame_missing_counts": {"top": 0, "robot": 0},
             "task_started": False,
             "task_completed": False,
             "task_blocked": False,
@@ -404,12 +451,15 @@ class LiveControlledScene:
 
     def write_dataset_manifest(self, scene_model):
         scene_file = doorless_scene_file_for(REPO_ROOT, self.scene_profile) if self.args.doorless_scene else None
+        run_dir = self.episode_logger.run_dir
         self.episode_logger.write_manifest(
             {
                 "schema_version": "homesense_episode_dataset_v1",
                 "quality_schema_version": "homesense_quality_v1",
+                "dataset_type": "multimodal_smart_home_robot_episode",
                 "scene_model": scene_model,
                 "scene_file": str(scene_file) if scene_file is not None else None,
+                "scene_variant": "doorless_main" if scene_file is not None else "default",
                 "robot_type": self.args.robot_type,
                 "resident_zone_mode": self.args.resident_zone,
                 "episode_seed": self.episode_seed,
@@ -417,10 +467,45 @@ class LiveControlledScene:
                 "initial_sensor_layout": self.sensor_layout,
                 "available_sensor_layouts": self.ordered_sensor_layout_names(),
                 "step_log_hz": float(self.args.step_log_hz),
+                "camera_logging": {
+                    "enabled": bool(self.camera_log_enabled),
+                    "sources": list(self.camera_log_sources),
+                    "robot_camera_mode": "all_rgb_sensors",
+                    "robot_camera_names": list(self.robot_rgb_sensors),
+                    "fps": float(self.args.camera_log_fps),
+                    "width": int(self.args.camera_log_width),
+                    "quality": int(self.args.camera_log_quality),
+                    "top_source_note": "top frames use the current viewer camera only while viewport mode is overview",
+                },
+                "data_modalities": [
+                    "resident_state",
+                    "smart_home_sensors",
+                    "virtual_sensors",
+                    "robot_state",
+                    "robot_action",
+                    "object_state",
+                    "safety",
+                    "camera_frame_reference",
+                ],
+                "training_scope": {
+                    "context_model": True,
+                    "task_selection": True,
+                    "safety_eval": True,
+                    "policy_behavior_cloning": bool(self.args.hdf5_replay),
+                    "human_aware_planning": "future_extension",
+                },
                 "files": {
                     "events": "events.jsonl",
                     "steps": "steps.jsonl",
                     "manifest": "manifest.json",
+                    "metadata": "metadata.json",
+                    "annotations": "annotations.json",
+                    "quality_report": "quality_report.json",
+                    "top_camera_dir": "cameras/top",
+                    "robot_camera_dir": "cameras/robot",
+                    "legacy_event_index": None
+                    if self.episode_logger.path is None or run_dir is None
+                    else str(self.episode_logger.path.relative_to(run_dir.parent)),
                 },
             }
         )
@@ -792,13 +877,19 @@ class LiveControlledScene:
             bridge.log(result.get("event", command), result)
 
 
-    def _find_robot_rgb_sensor(self):
+    def _find_robot_rgb_sensors(self):
         if self.robot is None:
-            return None
-        for sensor in self.robot.sensors.values():
-            if "rgb" in sensor.modalities:
-                return sensor
-        return None
+            return {}
+        sensors = {}
+        for key, sensor in self.robot.sensors.items():
+            if "rgb" not in sensor.modalities:
+                continue
+            raw_name = getattr(sensor, "name", None) or key
+            name = self.safe_camera_name(raw_name, fallback=f"camera_{len(sensors)}")
+            if name in sensors:
+                name = f"{name}_{len(sensors)}"
+            sensors[name] = sensor
+        return sensors
 
     def capture_video_frame(self, now):
         if now - self.last_video_frame_t < self.video_frame_interval_s:
@@ -816,6 +907,121 @@ class LiveControlledScene:
             bridge.update_video_frame(rgb_obs_to_jpeg(obs["rgb"]), source)
         except Exception as exc:
             bridge.log("video_frame_error", {"source": source, "reason": str(exc)})
+
+    def _relative_run_path(self, path):
+        if path is None or self.episode_logger.run_dir is None:
+            return None
+        try:
+            return str(Path(path).relative_to(self.episode_logger.run_dir))
+        except ValueError:
+            return str(path)
+
+    def _write_dataset_camera_frame(self, source, obs, frame, sim_t, camera_name=None):
+        if "rgb" not in obs:
+            return {"available": False, "reason": "rgb_missing"}
+        camera_dir = self.episode_logger.camera_dirs.get(source)
+        if camera_dir is None:
+            return {"available": False, "reason": "camera_dir_missing"}
+        safe_name = self.safe_camera_name(camera_name, fallback=source) if camera_name else None
+        file_name = f"episode_{self.episode_id:04d}_frame_{int(frame):08d}_{self.camera_frame_seq:06d}.jpg"
+        path = (camera_dir / safe_name / file_name) if safe_name else (camera_dir / file_name)
+        info = write_rgb_obs_jpeg(
+            obs["rgb"],
+            path,
+            quality=int(self.args.camera_log_quality),
+            width=int(self.args.camera_log_width),
+        )
+        info.update(
+            {
+                "available": True,
+                "source": source,
+                "camera_name": safe_name,
+                "path": self._relative_run_path(info["path"]),
+                "frame": int(frame),
+                "sim_time_s": float(sim_t),
+                "sequence": int(self.camera_frame_seq),
+            }
+        )
+        return info
+
+    def capture_dataset_camera_frames(self, now, sim_t, frame):
+        refs = {
+            "top": None,
+            "robot": None,
+        }
+        if (
+            not self.camera_log_enabled
+            or self.episode_id <= 0
+            or not self.episode_logger.enabled
+            or self.episode_phase() != "task_running"
+            or now - self.last_camera_log_t < self.camera_log_interval_s
+        ):
+            return refs
+
+        self.last_camera_log_t = now
+        self.camera_frame_seq += 1
+        self.episode_metrics["camera_sample_count"] += 1
+
+        for source in self.camera_log_sources:
+            try:
+                if source == "robot":
+                    if not self.robot_rgb_sensors:
+                        refs[source] = {"available": False, "reason": "robot_rgb_sensor_missing"}
+                    else:
+                        refs[source] = {}
+                        for camera_name, sensor in self.robot_rgb_sensors.items():
+                            try:
+                                obs, _ = sensor.get_obs()
+                                refs[source][camera_name] = self._write_dataset_camera_frame(
+                                    source,
+                                    obs,
+                                    frame,
+                                    sim_t,
+                                    camera_name=camera_name,
+                                )
+                            except Exception as camera_exc:
+                                refs[source][camera_name] = {
+                                    "available": False,
+                                    "source": source,
+                                    "camera_name": camera_name,
+                                    "reason": str(camera_exc),
+                                }
+                elif source == "top":
+                    if self.state.camera_mode != "overview":
+                        refs[source] = {"available": False, "reason": "viewer_not_in_overview_mode"}
+                    else:
+                        obs, _ = og.sim.viewer_camera.get_obs()
+                        refs[source] = self._write_dataset_camera_frame(source, obs, frame, sim_t)
+                else:
+                    refs[source] = {"available": False, "reason": f"unknown_source:{source}"}
+            except Exception as exc:
+                refs[source] = {"available": False, "reason": str(exc)}
+
+            if source == "robot" and isinstance(refs[source], dict):
+                if "available" in refs[source]:
+                    if refs[source].get("available"):
+                        self.camera_frame_counts[source] += 1
+                    else:
+                        self.camera_frame_missing_counts[source] += 1
+                else:
+                    available_count = sum(
+                        1 for item in refs[source].values() if isinstance(item, dict) and item.get("available")
+                    )
+                    missing_count = sum(
+                        1 for item in refs[source].values() if isinstance(item, dict) and not item.get("available")
+                    )
+                    self.camera_frame_counts[source] += available_count
+                    self.camera_frame_missing_counts[source] += missing_count
+                self.episode_metrics["camera_frame_counts"][source] = self.camera_frame_counts[source]
+                self.episode_metrics["camera_frame_missing_counts"][source] = self.camera_frame_missing_counts[source]
+            elif refs[source] and refs[source].get("available"):
+                self.camera_frame_counts[source] += 1
+                self.episode_metrics["camera_frame_counts"][source] = self.camera_frame_counts[source]
+            else:
+                self.camera_frame_missing_counts[source] += 1
+                self.episode_metrics["camera_frame_missing_counts"][source] = self.camera_frame_missing_counts[source]
+
+        return refs
 
     def configure_keyboard(self):
         KeyboardEventHandler.initialize()
@@ -1536,6 +1742,11 @@ class LiveControlledScene:
             "level": level,
             "robot_resident_distance_m": distance,
             "resident_near_robot": bool(distance is not None and distance < 1.5),
+            "near_collision": bool(distance is not None and distance < 0.75),
+            "collision": False,
+            "resident_in_robot_path": None,
+            "robot_should_yield": None,
+            "human_aware_planning_label": None,
             "min_robot_resident_distance_m": self.episode_metrics.get("min_robot_resident_distance_m"),
         }
 
@@ -1545,11 +1756,48 @@ class LiveControlledScene:
             "resident_zone": self.ground_truth_resident_zone(),
             "resident_position": human_pos,
             "resident_heading_deg": float(self.human_heading_deg),
+            "resident_velocity": self.current_resident_velocity(),
             "activity_id": self.activity_state.activity_id,
             "posture": self.activity_state.posture,
             "virtual_sensors": dict(self.activity_state.virtual_sensors),
             "robot_pose": self.current_robot_pose(),
+            "objects": self.object_state_snapshot(),
         }
+
+    def current_resident_velocity(self):
+        if not self.activity_state.movement_enabled:
+            return [0.0, 0.0, 0.0]
+        return [float(value) * HUMAN_MOVE_SPEED_MPS for value in self.human_input_vector]
+
+    def object_state_snapshot(self):
+        names = []
+        if self.scene_profile is not None:
+            names.extend(str(spec.get("name")) for spec in self.scene_profile.demo_objects if spec.get("name"))
+        if self.hdf5_replay_config is not None:
+            names.extend(str(name) for name in ((self.hdf5_replay_config.get("object_states") or {}).keys()))
+        states = {}
+        for name in sorted(set(names)):
+            try:
+                obj = self.env.scene.object_registry("name", name)
+            except Exception:
+                obj = None
+            if obj is None:
+                states[name] = {"available": False}
+                continue
+            try:
+                position, orientation = obj.get_position_orientation()
+                pos = [float(value) for value in position.tolist()]
+                states[name] = {
+                    "available": True,
+                    "position": pos,
+                    "orientation_xyzw": [float(value) for value in orientation.tolist()],
+                    "held_by": None,
+                    "on_floor": bool(pos[2] < 0.12),
+                    "distance_to_goal_m": None,
+                }
+            except Exception as exc:
+                states[name] = {"available": False, "reason": str(exc)}
+        return states
 
     def estimate_snapshot(self):
         confidence = self.resident_context.get("confidence")
@@ -1606,6 +1854,25 @@ class LiveControlledScene:
         if previous is None or distance < float(previous):
             self.episode_metrics["min_robot_resident_distance_m"] = distance
 
+    def camera_missing_frame_ratio(self):
+        if not self.camera_log_enabled:
+            return None
+        saved = sum(int(self.camera_frame_counts.get(source, 0)) for source in self.camera_log_sources)
+        missing = sum(int(self.camera_frame_missing_counts.get(source, 0)) for source in self.camera_log_sources)
+        total = saved + missing
+        if total <= 0:
+            return None
+        return missing / total
+
+    def episode_phase(self):
+        if self.robot_replay_active or self.state.robot.status == "running_replay":
+            return "task_running"
+        if self.episode_metrics.get("task_completed"):
+            return "task_finished"
+        if self.episode_metrics.get("task_started"):
+            return "task_post"
+        return "context_init"
+
     def episode_payload(self, event_reason=None):
         data = self.snapshot()
         return {
@@ -1629,6 +1896,7 @@ class LiveControlledScene:
             "sensor_quality": data.get("sensor_quality"),
             "risk": data.get("risk"),
             "training_validity": data.get("training_validity"),
+            "episode_phase": self.episode_phase(),
             "metrics": dict(self.episode_metrics),
         }
 
@@ -1636,6 +1904,25 @@ class LiveControlledScene:
         if self.episode_id <= 0:
             return
         self.episode_logger.write("episode_end", self.episode_payload(event_reason=reason))
+        self.episode_logger.write_quality_report(
+            {
+                "status": "closed",
+                "last_episode_id": self.episode_id,
+                "episode_count": self.episode_id,
+                "step_count": int(self.episode_metrics.get("frame_count") or 0),
+                "last_reason": reason,
+                "min_robot_resident_distance_m": self.episode_metrics.get("min_robot_resident_distance_m"),
+                "task_started": bool(self.episode_metrics.get("task_started")),
+                "task_completed": bool(self.episode_metrics.get("task_completed")),
+                "task_blocked": bool(self.episode_metrics.get("task_blocked")),
+                "last_task": self.episode_metrics.get("last_task"),
+                "last_replay_id": self.episode_metrics.get("last_replay_id"),
+                "camera_frame_counts": dict(self.camera_frame_counts),
+                "camera_frame_missing_counts": dict(self.camera_frame_missing_counts),
+                "missing_frame_ratio": self.camera_missing_frame_ratio(),
+                "missing_state_ratio": None,
+            }
+        )
 
     def start_episode(self, zone="random", reason="manual", randomize=True):
         if self.state.robot.busy:
@@ -2115,10 +2402,33 @@ class LiveControlledScene:
 
     def next_robot_action(self):
         if not self.robot_replay_active or self.hdf5_replay_actions is None:
+            self.last_robot_action_record = {
+                "source": "zero",
+                "step": None,
+                "vector": None,
+                "controller": None,
+                "normalized": None,
+            }
             return self.zero_action
         if self.robot_replay_step >= len(self.hdf5_replay_actions):
+            self.last_robot_action_record = {
+                "source": "zero",
+                "step": int(self.robot_replay_step),
+                "vector": None,
+                "controller": None,
+                "normalized": None,
+            }
             return self.zero_action
         action = self.hdf5_replay_actions[self.robot_replay_step]
+        self.last_robot_action_record = {
+            "source": "hdf5_replay",
+            "replay_id": self.hdf5_replay_id,
+            "step": int(self.robot_replay_step),
+            "total_steps": int(len(self.hdf5_replay_actions)),
+            "vector": self.compact_vector(action),
+            "controller": self.hdf5_controller_summary(),
+            "normalized": bool((self.hdf5_replay_config or {}).get("robot_config", {}).get("action_normalize", False)),
+        }
         if self.robot_replay_step % 30 == 0:
             bridge.log(
                 "hdf5_action_replay_step",
@@ -2130,6 +2440,29 @@ class LiveControlledScene:
             )
         self.robot_replay_step += 1
         return action
+
+    def compact_vector(self, values, max_values=32):
+        if values is None:
+            return None
+        try:
+            raw = values.tolist() if hasattr(values, "tolist") else list(values)
+        except Exception:
+            return None
+        return {
+            "values": [float(value) for value in raw[:max_values]],
+            "length": len(raw),
+            "truncated": len(raw) > max_values,
+        }
+
+    def hdf5_controller_summary(self):
+        robot_config = (self.hdf5_replay_config or {}).get("robot_config") or {}
+        controller_config = robot_config.get("controller_config") or {}
+        if not controller_config:
+            return None
+        return {
+            "groups": sorted(str(name) for name in controller_config),
+            "action_normalize": bool(robot_config.get("action_normalize", False)),
+        }
 
     def update_heavy_load(self, sim_t):
         return
@@ -2221,8 +2554,11 @@ class LiveControlledScene:
         data["estimates"] = self.estimate_snapshot()
         data["sensor_quality"] = self.sensor_quality_snapshot()
         data["risk"] = self.risk_snapshot()
+        data["objects"] = data["ground_truth"].get("objects", {})
+        data["action"] = dict(self.last_robot_action_record)
         data["training_validity"] = self.training_validity_snapshot()
         data["robot_pose"] = data["ground_truth"]["robot_pose"]
+        data["episode_phase"] = self.episode_phase()
         return data
 
     def log_step(self, now, sim_t, frame):
@@ -2232,15 +2568,44 @@ class LiveControlledScene:
             return
         self.last_step_log_t = now
         data = self.snapshot()
+        camera_frames = self.capture_dataset_camera_frames(now, sim_t, frame)
         self.episode_logger.write_step(
             {
+                "schema_version": "homesense_step_v1",
                 "episode_id": self.episode_id,
                 "episode_seed": self.episode_seed,
                 "episode_zone": self.episode_zone,
                 "scenario_type": data.get("scenario_type"),
+                "episode_phase": data.get("episode_phase"),
                 "frame": int(frame),
                 "sim_time_s": float(sim_t),
                 "wall_time_s": float(now),
+                "dataset": {
+                    "run_dir": None if self.episode_logger.run_dir is None else str(self.episode_logger.run_dir),
+                    "camera_frames": camera_frames,
+                },
+                "resident": {
+                    "state": data.get("human"),
+                    "ground_truth": {
+                        "zone": data.get("ground_truth", {}).get("resident_zone"),
+                        "position": data.get("ground_truth", {}).get("resident_position"),
+                        "heading_deg": data.get("ground_truth", {}).get("resident_heading_deg"),
+                        "velocity": data.get("ground_truth", {}).get("resident_velocity"),
+                        "activity_id": data.get("ground_truth", {}).get("activity_id"),
+                        "posture": data.get("ground_truth", {}).get("posture"),
+                    },
+                },
+                "sensors": {
+                    "readings": data.get("readings"),
+                    "motion": data.get("motion"),
+                    "pressure": data.get("pressure"),
+                    "layout": data.get("sensor_layout"),
+                    "quality": data.get("sensor_quality"),
+                    "virtual": data.get("activity_context", {}).get("virtual_sensors"),
+                },
+                "action": data.get("action"),
+                "objects": data.get("objects"),
+                "safety": data.get("risk"),
                 "human": data.get("human"),
                 "motion": data.get("motion"),
                 "pressure": data.get("pressure"),
@@ -2280,12 +2645,12 @@ class LiveControlledScene:
             self.read_sensors()
             self.update_episode_metrics()
             self.update_task()
-            self.log_step(now, sim_t, frame)
             if frame > 2 and self.ceiling_visibility_dirty:
                 visibility_result = self.sync_ceiling_visibility_for_view()
                 if visibility_result["event"] == "ceiling_visibility":
                     bridge.log(visibility_result["event"], visibility_result)
             self.update_follow_camera(now)
+            self.log_step(now, sim_t, frame)
             self.update_viewport_hud(now)
             self.flush_sensor_visual_history()
             self.capture_video_frame(now)
@@ -2344,6 +2709,34 @@ def main():
         type=float,
         default=2.0,
         help="Write compact step-level episode data at this frequency. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--save-camera-frames",
+        action="store_true",
+        help="Save sampled camera frames into the episode run directory. Disabled by default to avoid heavy disk writes.",
+    )
+    parser.add_argument(
+        "--camera-log-fps",
+        type=float,
+        default=2.0,
+        help="Camera frame sampling frequency when --save-camera-frames is enabled.",
+    )
+    parser.add_argument(
+        "--camera-log-sources",
+        default="robot",
+        help="Comma-separated camera frame sources to save: robot, top, or all. Top uses the viewer camera only in overview mode.",
+    )
+    parser.add_argument(
+        "--camera-log-width",
+        type=int,
+        default=640,
+        help="Resize saved camera JPEGs to this maximum width. Use 0 to keep the captured width.",
+    )
+    parser.add_argument(
+        "--camera-log-quality",
+        type=int,
+        default=80,
+        help="JPEG quality for saved camera frames.",
     )
     parser.add_argument(
         "--disable-viewport-hud",

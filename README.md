@@ -60,7 +60,12 @@ TORCHDYNAMO_DISABLE=1 /home/user/Desktop/isaac-sim-5.1/python.sh \
   --hdf5-replay /home/user/Projects/csp-2026-k/delivery_med_room_1_v01.hdf5 \
   --enable-activity-sensors \
   --sensor-layout current \
-  --step-log-hz 2.0
+  --step-log-hz 2.0 \
+  --save-camera-frames \
+  --camera-log-fps 2.0 \
+  --camera-log-sources robot \
+  --camera-log-width 640 \
+  --camera-log-quality 80
 ```
 
 Sensor layout options:
@@ -83,10 +88,21 @@ Viewport controls:
 - `W/A/S/D`: move resident when movement is enabled
 - `Q/E`: rotate resident in resident-follow mode
 
+Episode dataset output:
+
+- New runs are written under `BEHAVIOR-1K/logs/homesense_episodes/run_<UTC_TIMESTAMP>/`.
+- Run folders include `metadata.json`, `events.jsonl`, `steps.jsonl`, `annotations.json`, `quality_report.json`, and camera frame directories.
+- Camera frame saving is opt-in via `--save-camera-frames`; the recommended first setting is robot RGB camera JPEGs at 2 FPS and width 640.
+- `--camera-log-sources robot` saves only robot RGB frames. Use `top`, `robot,top`, or `all` when top-view frame references are needed.
+- Robot RGB frames are saved per discovered camera under `cameras/robot/<camera_name>/` and grouped by camera name in `steps.jsonl`.
+- Top frames are saved only while the viewport camera mode is `overview`, so the collector's free camera view is not forcibly moved during data capture.
+- Legacy flat logs are organized under `BEHAVIOR-1K/logs/homesense_episodes/legacy/`.
+- See `docs/EPISODE_DATA_SCHEMA.md` for the current schema.
+
 Generated dataset logs are written under:
 
 ```text
 BEHAVIOR-1K/logs/homesense_episodes/
 ```
 
-Each run creates an `episodes_<timestamp>.jsonl` event summary and a matching `run_<timestamp>/` directory containing `manifest.json`, `events.jsonl`, and `steps.jsonl`.
+Each run creates a legacy `episodes_<timestamp>.jsonl` event summary under `legacy/` and a matching `run_<timestamp>/` directory containing `manifest.json`, `events.jsonl`, `steps.jsonl`, annotations, quality report, and optional sampled camera frames.
