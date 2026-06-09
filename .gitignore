@@ -30,6 +30,7 @@ out/
 drive-download-*/
 drive-download-*.zip
 collab_env_export_*/
+archive/root_artifacts_*/
 
 # Replay transfer / analysis scratch files
 /asset_files.txt

@@ -57,7 +57,7 @@ TORCHDYNAMO_DISABLE=1 /home/user/Desktop/isaac-sim-5.1/python.sh \
   --full \
   --cpu-dynamics \
   --robot-type R1Pro \
-  --hdf5-replay /home/user/Projects/csp-2026-k/delivery_med_room_1_v01.hdf5 \
+  --hdf5-replay /home/user/Projects/csp-2026-k/replay-data/delivery_med_room_1_v01.hdf5 \
   --enable-activity-sensors \
   --sensor-layout current \
   --step-log-hz 2.0 \

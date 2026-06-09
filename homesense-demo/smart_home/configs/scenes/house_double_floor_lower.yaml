@@ -8,7 +8,7 @@ robot:
   start_position: [5.29986572265625, 5.574432373046875, 0.003753662109375]
   start_yaw_deg: -137.08492738949698
   start_orientation_xyzw: [0.0, 0.0, -0.9306889176368713, 0.3658115565776825]
-  source: vr_demo_test_v01.hdf5 metadata.task.robot_poses.R1Pro
+  source: replay-data/vr_demo_test_v01.hdf5 metadata.task.robot_poses.R1Pro
   note: "Reference pose for the temporary turning_on_radio replay scene."
 
 overview_camera:

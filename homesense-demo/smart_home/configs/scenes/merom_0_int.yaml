@@ -20,7 +20,7 @@ demo_objects:
     orientation_xyzw: [-0.010209739208221436, -0.02518530935049057, -0.0011579676065593958, 0.9996300935745239]
     replay_pose_offset: [0.0, 0.0, 0.0]
     scale: [1.0, 1.0, 1.0]
-    source: temp_1780307149426.-1673111485.json
+    source: archive/root_artifacts_2026-06-09/temp_1780307149426.-1673111485.json
 
 overview_camera:
   auto_from_scene_bounds: true
