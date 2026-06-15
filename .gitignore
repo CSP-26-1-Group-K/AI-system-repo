@@ -38,14 +38,20 @@ archive/root_artifacts_*/
 /replay_*_requirements.json
 /temp_*.json
 /house_double_floor_lower_task_*_template-partial_rooms.json
+replay-data/scene-metadata/
 
 # BEHAVIOR / OmniGibson source and datasets are not tracked from this repo.
 # We keep a small HomeSense code snapshot under homesense-demo/ instead.
 BEHAVIOR-1K/
 sensor-implementation-package-main/
 
-# Dataset / simulator assets should be shared out-of-band.
-datasets/
+# Dataset / simulator assets should be shared out-of-band. Keep only the
+# HomeSense dataset directory skeleton in git; generated runs can be large.
+datasets/*
+!datasets/.gitkeep
+!datasets/homesense_episodes/
+datasets/homesense_episodes/*
+!datasets/homesense_episodes/.gitkeep
 asset_pipeline/
 omnigibson-robot-assets/
 behavior-1k-assets/
@@ -56,6 +62,8 @@ logs/
 
 # Generated episode camera frames
 **/logs/homesense_episodes/**/cameras/
+datasets/homesense_episodes/run_*/
+datasets/homesense_episodes/legacy/
 **/cameras/robot/**/*.jpg
 **/cameras/top/**/*.jpg
 episode_*_frame_*.jpg

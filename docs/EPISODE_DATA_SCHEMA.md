@@ -6,39 +6,51 @@ This document describes the episode dataset structure used by the HomeSense Omni
 
 The dataset is designed for smart-home robot service development. It keeps the current sensor/context workflow usable while leaving room for future resident-aware collision avoidance and human-aware planning labels.
 
-## Run Directory
+## Dataset Units
 
-Each simulator launch creates a run directory:
+The dataset distinguishes the OmniGibson process from training samples:
+
+- `session`: one OmniGibson launch. It only stores session-level metadata and event index files.
+- `run`: one task replay execution. A run starts when the user presses `T` and ends when the replay completes or is interrupted by `R` / `I`.
+
+This means pressing `N` only prepares an independent resident/context scenario. It does not create a training run by itself.
+
+Each task replay creates a run directory:
 
 ```text
-logs/homesense_episodes/run_<UTC_TIMESTAMP>/
-  metadata.json
-  manifest.json
-  events.jsonl
-  steps.jsonl
-  annotations.json
-  quality_report.json
-  cameras/
-    top/
-    robot/
+datasets/homesense_episodes/
+  session_<UTC_TIMESTAMP>_metadata.json
+  session_<UTC_TIMESTAMP>_events.jsonl
+  run_<UTC_TIMESTAMP>_ep####_<scenario>_<replay_id>/
+    metadata/
+      metadata.json
+      manifest.json
+      events.jsonl
+      annotations.json
+      quality_report.json
+      dataset.hdf5
+    data/
+      steps.jsonl
+      cameras/
+        <robot_camera_name>/
 ```
 
 Legacy flat logs are stored under:
 
 ```text
-logs/homesense_episodes/legacy/
+datasets/homesense_episodes/legacy/
   episodes_<UTC_TIMESTAMP>.jsonl
-  run_<OLD_TIMESTAMP>/
-  LEGACY_MANIFEST.json
 ```
 
 ## Metadata
 
-`metadata.json` and `manifest.json` currently contain the same run-level metadata:
+`metadata/metadata.json` and `metadata/manifest.json` currently contain the same run-level metadata:
 
 - schema version
 - scene model and scene variant
 - robot type
+- task name and replay id
+- resident scenario, position, posture, and activity context
 - resident zone mode
 - sensor layout options
 - step logging rate
@@ -47,9 +59,55 @@ logs/homesense_episodes/legacy/
 - training scope
 - file layout
 
+## HDF5 Export
+
+When a run closes, either because replay completed or because the user reset/interrupted with `R` / `I`, the logger also writes:
+
+```text
+metadata/dataset.hdf5
+```
+
+This file is a structured training index for the run. It does not duplicate JPEG image bytes by default, because that would quickly inflate the dataset. Instead, it stores the camera frame table with relative paths pointing to `data/cameras/<robot_camera_name>/*.jpg`.
+
+Current HDF5 layout:
+
+```text
+metadata/dataset.hdf5
+  attrs:
+    schema_version = homesense_task_run_hdf5_v1
+    run_id
+    source_run_dir
+    image_storage = external_jpeg_relative_paths
+  metadata/
+    metadata
+    manifest
+    annotations
+    quality_report
+  records/
+    events_json
+    steps_json
+  arrays/
+    sim_time_s
+    wall_time_s
+    robot_position
+    robot_orientation_xyzw
+    resident_position
+    resident_velocity
+    action_vector
+  cameras/
+    frames_json
+    path
+    camera_name
+    source
+    step_index
+    sim_time_s
+```
+
+The JSON datasets preserve full fidelity for analysis. The numeric arrays provide a faster path for simple training loaders and sanity checks.
+
 ## Steps
 
-`steps.jsonl` is the primary training/analysis stream. Each line is a full multimodal snapshot.
+`data/steps.jsonl` is the primary training/analysis stream. Each line is a full multimodal snapshot sampled while a task replay is running.
 
 Important top-level fields:
 
@@ -82,7 +140,7 @@ Each step includes:
 
 ```json
 "dataset": {
-  "run_dir": ".../logs/homesense_episodes/run_<UTC_TIMESTAMP>",
+  "run_dir": ".../datasets/homesense_episodes/run_<UTC_TIMESTAMP>",
   "camera_frames": {
     "top": null,
     "robot": {
@@ -90,7 +148,7 @@ Each step includes:
         "available": true,
         "source": "robot",
         "camera_name": "front_camera",
-        "path": "cameras/robot/front_camera/episode_0001_frame_00001234_000001.jpg",
+        "path": "data/cameras/front_camera/episode_0001_frame_00001234_000001.jpg",
         "frame": 1234,
         "sim_time_s": 41.13,
         "sequence": 1,
@@ -104,7 +162,7 @@ Each step includes:
         "available": true,
         "source": "robot",
         "camera_name": "left_wrist_camera",
-        "path": "cameras/robot/left_wrist_camera/episode_0001_frame_00001234_000001.jpg"
+        "path": "data/cameras/left_wrist_camera/episode_0001_frame_00001234_000001.jpg"
       }
     }
   }
@@ -123,7 +181,7 @@ Current behavior:
 - Camera frames are saved only during `task_running`, so context initialization does not create image samples.
 - Robot camera frames come from every RGB sensor discovered on the robot and are grouped by camera name under the same step timestamp.
 - Top frames use the active viewer camera only while the viewport mode is `overview`; this avoids moving the user's camera during data collection.
-- The image file itself is stored as JPEG under `cameras/<source>/`; JSONL stores only the relative path and metadata.
+- The image file itself is stored as JPEG under `data/cameras/<camera_name>/`; JSONL stores only the relative path and metadata.
 
 ## Resident Section
 
@@ -213,4 +271,4 @@ Current fields include:
 - camera frame counts and missing frame ratio
 - missing state ratio placeholder
 
-Future work should compute this from `steps.jsonl` after each run.
+The same final quality report is embedded into `metadata/dataset.hdf5` under `metadata/quality_report`.

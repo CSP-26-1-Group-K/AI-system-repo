@@ -1,4 +1,5 @@
 scene_model: Merom_0_int
+scene_file: smart_home/configs/scenes/Merom_0_int.demo_v09.json
 
 resident:
   start_position: [2.55, 8.55, 0.0]

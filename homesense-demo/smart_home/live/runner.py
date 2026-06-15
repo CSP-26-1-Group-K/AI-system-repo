@@ -61,11 +61,50 @@ from smart_home.sensors import SmartHomeSensorRig
 from smart_home.service_types import SmartHomeState, TaskCommand
 
 
-def doorless_scene_file_for(repo_root, scene_profile):
-    if scene_profile is None or not scene_profile.doorless_scene_file:
-        return None
-    path = Path(scene_profile.doorless_scene_file)
-    return path if path.is_absolute() else repo_root / path
+SCENARIO_REPLAY_RULES = {
+    "arriving_home": "delivery_med_room_2_sc",
+    "watching_tv": "delivery_med_room_2_sc",
+    "resting_on_sofa": "delivery_med_room_2_sc",
+    "lying_in_bed": "delivery_med_room_3",
+    "toilet_use": "delivery_failure_case",
+}
+
+TASK_EVAL_OBJECT_NAME = "medicine_bottle_0"
+TASK_EVAL_CAP_OFFSET_M = 0.08
+TASK_EVAL_GRIPPER_RADIUS_M = 0.18
+TASK_EVAL_GRASP_HOLD_S = 0.50
+TASK_EVAL_MOVE_SPEED_THRESHOLD_MPS = 0.025
+TASK_EVAL_MOVE_HOLD_S = 0.80
+TASK_EVAL_PLACE_HOLD_S = 1.20
+TASK_EVAL_TARGET_HALF_EXTENTS = [0.65, 0.65, 0.75]
+TASK_EVAL_WEIGHTS = {
+    "grasp": 0.30,
+    "transport": 0.30,
+    "place": 0.40,
+}
+ASSET_RESET_EXCLUDED_PREFIXES = (
+    "robot",
+    "walls_",
+    "floors_",
+    "ceilings_",
+    "scene_",
+    "smart_home",
+    "physics",
+)
+
+
+def configured_scene_file_for(repo_root, scene_profile, *, allow_doorless):
+    if scene_profile is None:
+        return None, "default"
+    raw_path = scene_profile.scene_file
+    variant = "profile_main"
+    if not raw_path and allow_doorless and scene_profile.doorless_scene_file:
+        raw_path = scene_profile.doorless_scene_file
+        variant = "doorless_main"
+    if not raw_path:
+        return None, "default"
+    path = Path(raw_path)
+    return (path if path.is_absolute() else repo_root / path), variant
 
 
 class LiveControlledScene:
@@ -115,13 +154,19 @@ class LiveControlledScene:
         self.scene_profile = None
         self.pressure_sensor_name = "pressure_sensor_0"
         self.rng = random.Random(args.episode_seed)
-        self.episode_logger = EpisodeJsonlLogger(REPO_ROOT / args.episode_log_dir, enabled=not args.disable_episode_logging)
+        episode_log_dir = Path(args.episode_log_dir)
+        if not episode_log_dir.is_absolute():
+            episode_log_dir = REPO_ROOT.parent / episode_log_dir
+        self.episode_logger = EpisodeJsonlLogger(episode_log_dir, enabled=not args.disable_episode_logging)
         self.episode_id = 0
         self.episode_started_at = None
         self.episode_seed = args.episode_seed
         self.episode_zone = None
         self.episode_scenario_type = None
         self.episode_metrics = self.empty_episode_metrics()
+        self.task_eval = self.empty_task_eval()
+        self.task_eval_last_update_t = None
+        self.task_eval_last_object_pos = None
         self.activity_simulator = ActivitySensorSimulator(enabled=False)
         self.activity_state = ActivityState()
         self.human_posture = "standing"
@@ -132,9 +177,19 @@ class LiveControlledScene:
         self.hud_labels = {}
         self.last_hud_update_t = 0.0
         self.hdf5_replay_actions = None
+        self.hdf5_replay_states = None
+        self.hdf5_replay_state_sizes = None
         self.hdf5_replay_config = None
         self.hdf5_replay_id = None
+        self.hdf5_replay_scene_file_path = None
+        self.hdf5_replay_paths = []
+        self.hdf5_replay_index = -1
+        self.hdf5_replay_playback_mode = "action"
+        self.hdf5_state_replay_failed = False
+        self.active_scene_file = None
+        self.active_scene_variant = "default"
         self.robot_replay_active = False
+        self.robot_replay_paused = False
         self.robot_replay_step = 0
         self.last_robot_action_record = {
             "source": "zero",
@@ -162,6 +217,56 @@ class LiveControlledScene:
         name = name.split("/")[-1]
         name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._-")
         return name or fallback
+
+    @staticmethod
+    def replay_key_for_path(path):
+        stem = Path(path).stem
+        if stem.endswith("_v01"):
+            return stem[:-4]
+        return stem
+
+    @staticmethod
+    def should_restore_asset_state(name, state):
+        name = str(name)
+        if name.startswith(ASSET_RESET_EXCLUDED_PREFIXES):
+            return False
+        root_link = (state or {}).get("root_link") or {}
+        return root_link.get("pos") is not None and root_link.get("ori") is not None
+
+    def discover_hdf5_replay_paths(self):
+        candidates = []
+        if self.args.hdf5_replay:
+            candidates.append(Path(self.args.hdf5_replay))
+        for raw_dir in getattr(self.args, "hdf5_replay_dir", []) or []:
+            replay_dir = Path(raw_dir)
+            if not replay_dir.is_absolute():
+                replay_dir = REPO_ROOT / replay_dir
+            candidates.extend(sorted(replay_dir.glob("*.hdf5")))
+        candidates.extend(sorted((REPO_ROOT.parent).glob("delivery_med_room_*.hdf5")))
+        candidates.extend(sorted((REPO_ROOT.parent).glob("delivery_failure_case*.hdf5")))
+        candidates.extend(sorted((REPO_ROOT.parent / "replay-data").glob("*.hdf5")))
+
+        paths = []
+        seen = set()
+        for path in candidates:
+            if not path.is_absolute():
+                path = REPO_ROOT / path
+            try:
+                resolved = path.resolve()
+            except FileNotFoundError:
+                continue
+            if not resolved.exists() or resolved in seen:
+                continue
+            # Keep automatic demo selection to the current v09 replay set.
+            if not (
+                resolved.stem.startswith("delivery_med_room_2")
+                or resolved.stem.startswith("delivery_med_room_3")
+                or resolved.stem.startswith("delivery_failure_case")
+            ):
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+        return paths
 
     def setup(self):
         preset = PRESETS[self.args.preset]
@@ -193,7 +298,22 @@ class LiveControlledScene:
         )
         gm.HEADLESS = False
         gm.USE_GPU_DYNAMICS = not self.args.cpu_dynamics
-        using_doorless_scene = bool(self.args.doorless_scene and self.scene_profile and self.scene_profile.doorless_scene_file)
+        selected_scene_file, selected_scene_variant = configured_scene_file_for(
+            REPO_ROOT,
+            self.scene_profile,
+            allow_doorless=bool(self.args.doorless_scene),
+        )
+        replay_scene_source = str(getattr(self.args, "hdf5_replay_scene_source", "auto") or "auto")
+        if (
+            self.hdf5_replay_scene_file_path is not None
+            and replay_scene_source in {"auto", "hdf5"}
+            and self.hdf5_replay_playback_mode == "state"
+        ):
+            selected_scene_file = self.hdf5_replay_scene_file_path
+            selected_scene_variant = "hdf5_embedded"
+        self.active_scene_file = selected_scene_file
+        self.active_scene_variant = selected_scene_variant
+        using_doorless_scene = selected_scene_variant == "doorless_main"
         gm.ENABLE_FLATCACHE = self.args.flatcache if self.args.flatcache is not None else not using_doorless_scene
         gm.ENABLE_OBJECT_STATES = False
         gm.ENABLE_TRANSITION_RULES = False
@@ -210,21 +330,27 @@ class LiveControlledScene:
         if self.args.empty_scene:
             scene_cfg = {"type": "Scene"}
         else:
-            scene_file = doorless_scene_file_for(REPO_ROOT, self.scene_profile) if self.args.doorless_scene else None
             scene_cfg = {
                 "type": "InteractiveTraversableScene",
                 "scene_model": scene_model,
                 "load_object_categories": list(STRUCTURE_CATEGORIES) if not self.args.full else None,
                 "include_robots": True,
             }
-            if scene_file is not None:
-                if not scene_file.exists():
+            if selected_scene_file is not None:
+                if not selected_scene_file.exists():
                     raise FileNotFoundError(
-                        f"Doorless scene file is missing: {scene_file}. "
-                        "Generate it before launching, or pass --no-doorless-scene."
+                        f"Configured scene file is missing: {selected_scene_file}. "
+                        "Sync the tracked scene JSON before launching, or disable the scene override."
                     )
-                scene_cfg["scene_file"] = str(scene_file)
-                bridge.log("doorless_scene_file_selected", {"scene_model": scene_model, "scene_file": str(scene_file)})
+                scene_cfg["scene_file"] = str(selected_scene_file)
+                bridge.log(
+                    "scene_file_selected",
+                    {
+                        "scene_model": scene_model,
+                        "scene_file": str(selected_scene_file),
+                        "scene_variant": selected_scene_variant,
+                    },
+                )
         robot_cfg = {
             "type": self.args.robot_type,
             "obs_modalities": ["rgb"],
@@ -250,10 +376,14 @@ class LiveControlledScene:
                 robot_cfg["position"] = replay_robot_cfg["position"]
             if "orientation" in replay_robot_cfg:
                 robot_cfg["orientation"] = replay_robot_cfg["orientation"]
+            robot_registry_name = self.hdf5_replay_config.get("robot_registry_name")
+            if robot_registry_name:
+                robot_cfg["name"] = robot_registry_name
             bridge.log(
                 "hdf5_replay_robot_config_applied",
                 {
                     "replay_id": self.hdf5_replay_id,
+                    "robot_name": robot_cfg.get("name"),
                     "action_normalize": robot_cfg.get("action_normalize"),
                     "controller_groups": sorted((robot_cfg.get("controller_config") or {}).keys()),
                     "has_reset_joint_pos": "reset_joint_pos" in robot_cfg,
@@ -449,17 +579,65 @@ class LiveControlledScene:
             "last_replay_id": None,
         }
 
+    def reset_task_run_counters(self):
+        self.episode_metrics = self.empty_episode_metrics()
+        self.camera_frame_counts = {source: 0 for source in ("top", "robot")}
+        self.camera_frame_missing_counts = {source: 0 for source in ("top", "robot")}
+        self.camera_frame_seq = 0
+        self.last_camera_log_t = 0.0
+
+    def empty_task_eval(self):
+        return {
+            "schema_version": "homesense_task_eval_v1",
+            "enabled": False,
+            "finalized": False,
+            "task": None,
+            "replay_id": None,
+            "object_name": TASK_EVAL_OBJECT_NAME,
+            "target": {
+                "source": None,
+                "center": None,
+                "half_extents": list(TASK_EVAL_TARGET_HALF_EXTENTS),
+            },
+            "thresholds": {
+                "cap_offset_m": TASK_EVAL_CAP_OFFSET_M,
+                "gripper_radius_m": TASK_EVAL_GRIPPER_RADIUS_M,
+                "grasp_hold_s": TASK_EVAL_GRASP_HOLD_S,
+                "move_speed_threshold_mps": TASK_EVAL_MOVE_SPEED_THRESHOLD_MPS,
+                "move_hold_s": TASK_EVAL_MOVE_HOLD_S,
+                "place_hold_s": TASK_EVAL_PLACE_HOLD_S,
+            },
+            "weights": dict(TASK_EVAL_WEIGHTS),
+            "subgoals": {
+                "grasp": {"success": False, "hold_s": 0.0, "contact": False, "min_cap_distance_m": None},
+                "transport": {"success": False, "moving_streak_s": 0.0, "max_speed_mps": 0.0},
+                "place": {"success": False, "hold_s": 0.0, "inside_target": False},
+            },
+            "object": {
+                "position": None,
+                "initial_position": None,
+                "cap_point": None,
+                "speed_mps": 0.0,
+            },
+            "score": 0.0,
+            "success": False,
+            "label": "not_started",
+            "reason": None,
+            "started_at_wall_time_s": None,
+            "updated_at_wall_time_s": None,
+            "finished_at_wall_time_s": None,
+        }
+
     def write_dataset_manifest(self, scene_model):
-        scene_file = doorless_scene_file_for(REPO_ROOT, self.scene_profile) if self.args.doorless_scene else None
-        run_dir = self.episode_logger.run_dir
         self.episode_logger.write_manifest(
             {
-                "schema_version": "homesense_episode_dataset_v1",
+                "schema_version": "homesense_dataset_session_v1",
                 "quality_schema_version": "homesense_quality_v1",
-                "dataset_type": "multimodal_smart_home_robot_episode",
+                "dataset_type": "multimodal_smart_home_robot_task_runs",
+                "dataset_unit": "task_replay_run",
                 "scene_model": scene_model,
-                "scene_file": str(scene_file) if scene_file is not None else None,
-                "scene_variant": "doorless_main" if scene_file is not None else "default",
+                "scene_file": str(self.active_scene_file) if self.active_scene_file is not None else None,
+                "scene_variant": self.active_scene_variant,
                 "robot_type": self.args.robot_type,
                 "resident_zone_mode": self.args.resident_zone,
                 "episode_seed": self.episode_seed,
@@ -495,31 +673,45 @@ class LiveControlledScene:
                     "human_aware_planning": "future_extension",
                 },
                 "files": {
-                    "events": "events.jsonl",
-                    "steps": "steps.jsonl",
-                    "manifest": "manifest.json",
-                    "metadata": "metadata.json",
-                    "annotations": "annotations.json",
-                    "quality_report": "quality_report.json",
-                    "top_camera_dir": "cameras/top",
-                    "robot_camera_dir": "cameras/robot",
+                    "events": "metadata/events.jsonl",
+                    "steps": "data/steps.jsonl",
+                    "manifest": "metadata/manifest.json",
+                    "metadata": "metadata/metadata.json",
+                    "annotations": "metadata/annotations.json",
+                    "quality_report": "metadata/quality_report.json",
+                    "hdf5": "metadata/dataset.hdf5",
+                    "camera_dir": "data/cameras/<robot_camera_name>/",
                     "legacy_event_index": None
-                    if self.episode_logger.path is None or run_dir is None
-                    else str(self.episode_logger.path.relative_to(run_dir.parent)),
+                    if self.episode_logger.path is None
+                    else str(self.episode_logger.path.relative_to(self.episode_logger.log_dir)),
                 },
             }
         )
 
-    def load_hdf5_replay(self):
-        if not self.args.hdf5_replay:
-            return
+    def load_hdf5_replay(self, replay_path=None, reason="startup"):
         import h5py
 
-        replay_path = Path(self.args.hdf5_replay)
+        if replay_path is None:
+            self.hdf5_replay_paths = self.discover_hdf5_replay_paths()
+            if not self.hdf5_replay_paths:
+                return
+            replay_path = self.hdf5_replay_paths[0]
+        replay_path = Path(replay_path)
         if not replay_path.is_absolute():
             replay_path = REPO_ROOT / replay_path
         if not replay_path.exists():
             raise FileNotFoundError(f"HDF5 replay file does not exist: {replay_path}")
+        replay_path = replay_path.resolve()
+        self.hdf5_replay_actions = None
+        self.hdf5_replay_states = None
+        self.hdf5_replay_state_sizes = None
+        self.hdf5_replay_config = None
+        self.hdf5_replay_scene_file_path = None
+        self.hdf5_state_replay_failed = False
+        self.robot_replay_paused = False
+        self.hdf5_replay_id = replay_path.stem
+        if replay_path in self.hdf5_replay_paths:
+            self.hdf5_replay_index = self.hdf5_replay_paths.index(replay_path)
         with h5py.File(replay_path, "r") as f:
             data = f["data"]
             demo_key = f"demo_{self.args.hdf5_replay_episode}"
@@ -529,41 +721,85 @@ class LiveControlledScene:
             scene_file = json.loads(data.attrs["scene_file"])
             demo = data[demo_key]
             self.hdf5_replay_actions = th.tensor(demo["action"][:], dtype=th.float32)
+            if "state" in demo and "state_size" in demo:
+                self.hdf5_replay_states = th.tensor(demo["state"][:], dtype=th.float32)
+                self.hdf5_replay_state_sizes = th.tensor(demo["state_size"][:], dtype=th.int64)
             self.hdf5_replay_config = {
                 "path": str(replay_path),
+                "replay_key": self.replay_key_for_path(replay_path),
                 "demo_key": demo_key,
                 "scene_model": (config.get("scene") or {}).get("scene_model"),
                 "scene_file": (config.get("scene") or {}).get("scene_file"),
+                "embedded_scene_file": None,
                 "robot_config": dict((config.get("robots") or [{}])[0]),
                 "scene_metadata": scene_file.get("metadata", {}),
                 "object_poses": {},
                 "object_states": {},
                 "robot_state": {},
+                "robot_registry_name": None,
             }
             object_registry = ((scene_file.get("state") or {}).get("registry") or {}).get("object_registry") or {}
-            for object_name in ("medicine_bottle_0",):
-                root_link = (object_registry.get(object_name) or {}).get("root_link") or {}
+            if scene_file:
+                replay_scene_dir = REPO_ROOT / "logs" / "homesense_replay_scenes"
+                replay_scene_dir.mkdir(parents=True, exist_ok=True)
+                scene_path = replay_scene_dir / f"{self.hdf5_replay_id}_{demo_key}.json"
+                scene_path.write_text(json.dumps(scene_file, indent=2), encoding="utf-8")
+                self.hdf5_replay_scene_file_path = scene_path
+                self.hdf5_replay_config["embedded_scene_file"] = str(scene_path)
+            robot_registry_names = [name for name in object_registry if str(name).startswith("robot")]
+            if robot_registry_names:
+                self.hdf5_replay_config["robot_registry_name"] = sorted(
+                    robot_registry_names,
+                    key=lambda name: (name != "robot", name),
+                )[0]
+            for object_name, object_state in object_registry.items():
+                if not self.should_restore_asset_state(object_name, object_state):
+                    continue
+                root_link = (object_state or {}).get("root_link") or {}
                 if root_link.get("pos") is not None and root_link.get("ori") is not None:
                     self.hdf5_replay_config["object_poses"][object_name] = {
                         "position": root_link["pos"],
                         "orientation_xyzw": root_link["ori"],
                     }
-                    self.hdf5_replay_config["object_states"][object_name] = dict(object_registry.get(object_name) or {})
+                    self.hdf5_replay_config["object_states"][object_name] = dict(object_state or {})
             robot_state = dict(object_registry.get("robot") or {})
             root_link = robot_state.get("root_link") or {}
             if root_link.get("pos") is not None and root_link.get("ori") is not None:
                 self.hdf5_replay_config["robot_state"] = robot_state
-        self.hdf5_replay_id = replay_path.stem
+        requested_mode = str(getattr(self.args, "hdf5_replay_playback", "auto") or "auto")
+        controller_groups = set((self.hdf5_replay_config["robot_config"].get("controller_config") or {}).keys())
+        has_base_controller = bool(controller_groups & {"base", "base_drive", "locomotion"})
+        has_state_replay = self.hdf5_replay_states is not None and self.hdf5_replay_state_sizes is not None
+        if requested_mode == "state":
+            self.hdf5_replay_playback_mode = "state" if has_state_replay else "action"
+        elif requested_mode == "action":
+            self.hdf5_replay_playback_mode = "action"
+        else:
+            self.hdf5_replay_playback_mode = "state" if has_state_replay and not has_base_controller else "action"
         bridge.log(
             "hdf5_replay_loaded",
             {
                 "path": str(replay_path),
+                "reason": reason,
                 "demo_key": self.hdf5_replay_config["demo_key"],
+                "replay_key": self.hdf5_replay_config["replay_key"],
+                "available_replays": [path.stem for path in self.hdf5_replay_paths],
                 "scene_model": self.hdf5_replay_config["scene_model"],
                 "num_actions": int(self.hdf5_replay_actions.shape[0]),
                 "action_dim": int(self.hdf5_replay_actions.shape[1]) if self.hdf5_replay_actions.ndim > 1 else None,
                 "action_normalize": self.hdf5_replay_config["robot_config"].get("action_normalize"),
-                "object_poses": self.hdf5_replay_config["object_poses"],
+                "playback_mode": self.hdf5_replay_playback_mode,
+                "has_state_replay": has_state_replay,
+                "has_base_controller": has_base_controller,
+                "embedded_scene_file": self.hdf5_replay_config["embedded_scene_file"],
+                "robot_registry_name": self.hdf5_replay_config["robot_registry_name"],
+                "restorable_object_count": len(self.hdf5_replay_config["object_states"]),
+                "restorable_objects": sorted(self.hdf5_replay_config["object_states"])[:32],
+                "object_poses": {
+                    name: pose
+                    for name, pose in self.hdf5_replay_config["object_poses"].items()
+                    if name == TASK_EVAL_OBJECT_NAME
+                },
             },
         )
 
@@ -812,9 +1048,17 @@ class LiveControlledScene:
         self.command_queue.put(("run_task", (str(task),)))
         return {"event": "task_queued", "task": task}
 
+    def queue_toggle_replay_pause(self):
+        self.command_queue.put(("toggle_replay_pause", ()))
+        return {"event": "toggle_replay_pause_queued"}
+
     def queue_reset_scene(self):
         self.command_queue.put(("reset_scene", ()))
         return {"event": "reset_queued"}
+
+    def queue_restore_runtime_initial_state(self):
+        self.command_queue.put(("restore_runtime_initial_state", ()))
+        return {"event": "restore_runtime_initial_state_queued"}
 
     def queue_new_episode(self):
         self.command_queue.put(("new_episode", ()))
@@ -848,8 +1092,13 @@ class LiveControlledScene:
             elif command == "run_task":
                 result = self.run_task(*args)
                 self.pending_robot_task = False
+            elif command == "toggle_replay_pause":
+                result = self.toggle_replay_pause()
             elif command == "reset_scene":
                 result = self.reset_scene()
+                self.pending_robot_task = False
+            elif command == "restore_runtime_initial_state":
+                result = self.restore_runtime_initial_state(reason="manual_runtime_reset")
                 self.pending_robot_task = False
             elif command == "new_episode":
                 result = self.start_episode(zone=self.args.resident_zone, reason="manual", randomize=True)
@@ -922,9 +1171,9 @@ class LiveControlledScene:
         camera_dir = self.episode_logger.camera_dirs.get(source)
         if camera_dir is None:
             return {"available": False, "reason": "camera_dir_missing"}
-        safe_name = self.safe_camera_name(camera_name, fallback=source) if camera_name else None
+        safe_name = self.safe_camera_name(camera_name, fallback=source) if camera_name else self.safe_camera_name(source, fallback="camera")
         file_name = f"episode_{self.episode_id:04d}_frame_{int(frame):08d}_{self.camera_frame_seq:06d}.jpg"
-        path = (camera_dir / safe_name / file_name) if safe_name else (camera_dir / file_name)
+        path = camera_dir / safe_name / file_name
         info = write_rgb_obs_jpeg(
             obs["rgb"],
             path,
@@ -1053,6 +1302,12 @@ class LiveControlledScene:
         key = getattr(lazy.carb.input.KeyboardInput, "R", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, self.queue_reset_scene)
+        key = getattr(lazy.carb.input.KeyboardInput, "I", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_restore_runtime_initial_state)
+        key = getattr(lazy.carb.input.KeyboardInput, "P", None)
+        if key is not None:
+            KeyboardEventHandler.add_keyboard_callback(key, self.queue_toggle_replay_pause)
         key = getattr(lazy.carb.input.KeyboardInput, "N", None)
         if key is not None:
             KeyboardEventHandler.add_keyboard_callback(key, self.queue_new_episode)
@@ -1076,9 +1331,11 @@ class LiveControlledScene:
             "  F: Toggle motion sensor ranges\n"
             "  L: Cycle sensor layout (current / dense / sparse)\n"
             "  K: Export active sensor layout after viewport edits\n"
+            "  I: Restore the robot/object runtime initial state for replay\n"
+            "  P: Pause/resume the active HDF5 replay in place\n"
             "  N: Start a randomized data-collection episode\n"
-            "  T/Y: Trigger deliver-item / laundry replay placeholder\n"
-            "  R: Reset scene\n"
+            "  T/Y: Trigger deliver-item HDF5 replay selected by activity / laundry placeholder\n"
+            "  R: Reset scene and restore runtime initial state\n"
             "  Esc: Quit\n",
             flush=True,
         )
@@ -1133,13 +1390,18 @@ class LiveControlledScene:
         confidence = context.get("confidence")
         confidence_text = f"{float(confidence):.2f}" if confidence is not None else "--"
         dataset_dir = str(self.episode_logger.run_dir) if self.episode_logger.run_dir else "disabled"
+        replay_text = self.hdf5_replay_id or "--"
+        if self.robot_replay_active and self.hdf5_replay_actions is not None:
+            replay_text += f" step={int(self.robot_replay_step)}/{int(len(self.hdf5_replay_actions))}"
+            if self.robot_replay_paused:
+                replay_text += " paused"
         values = {
             "episode": f"Episode: {self.episode_id} / zone={self.episode_zone}",
             "zone": f"Resident: {self.state.human.zone} pos={self._short_vec(self.state.human.position)}",
             "motion": f"Motion: {self.state.motion.active_sensor_id or '--'} detected={self.state.motion.detected} layout={self.sensor_layout}",
             "activity": f"Activity: {self.activity_state.activity_id or '--'} confidence={confidence_text}",
             "virtual": f"Virtual sensors: {virtual_summary}",
-            "task": f"Robot task: {self.state.robot.task or '--'} status={self.state.robot.status}",
+            "task": f"Robot task: {self.state.robot.task or '--'} status={self.state.robot.status} replay={replay_text}",
             "logging": f"Dataset: {dataset_dir}",
         }
         for key, text in values.items():
@@ -1567,10 +1829,16 @@ class LiveControlledScene:
         if self.hdf5_replay_config is None:
             return
         object_states = self.hdf5_replay_config.get("object_states") or {}
+        restored = []
+        missing = []
+        failed = []
         for name, state in object_states.items():
-            obj = self.env.scene.object_registry("name", name)
+            try:
+                obj = self.env.scene.object_registry("name", name)
+            except Exception:
+                obj = None
             if obj is None:
-                bridge.log("hdf5_replay_object_pose_missing", {"name": name, "reason": reason})
+                missing.append(name)
                 continue
             root_link = state.get("root_link") or {}
             if root_link.get("pos") is None or root_link.get("ori") is None:
@@ -1593,21 +1861,34 @@ class LiveControlledScene:
                 if hasattr(obj, "keep_still"):
                     obj.keep_still()
                 actual_pos, actual_ori = obj.get_position_orientation()
-                bridge.log(
-                    "hdf5_replay_object_pose_synced",
+                restored.append(
                     {
                         "name": name,
-                        "reason": reason,
                         "target_position": target_position,
                         "hdf5_position": root_link["pos"],
                         "replay_pose_offset": offset,
                         "actual_position": [float(v) for v in actual_pos.tolist()],
                         "actual_orientation_xyzw": [float(v) for v in actual_ori.tolist()],
-                        "velocity_policy": "zero_keep_still",
-                    },
+                    }
                 )
             except Exception as exc:
-                bridge.log("hdf5_replay_object_pose_sync_failed", {"name": name, "reason": reason, "error": str(exc)})
+                failed.append({"name": name, "error": str(exc)})
+        sample_names = {TASK_EVAL_OBJECT_NAME}
+        sample_names.update(item["name"] for item in restored[:5])
+        bridge.log(
+            "hdf5_replay_object_poses_synced",
+            {
+                "reason": reason,
+                "requested_count": len(object_states),
+                "restored_count": len(restored),
+                "missing_count": len(missing),
+                "failed_count": len(failed),
+                "missing": missing[:16],
+                "failed": failed[:8],
+                "samples": [item for item in restored if item["name"] in sample_names][:8],
+                "velocity_policy": "zero_keep_still",
+            },
+        )
 
     def sync_hdf5_replay_robot_state(self, reason):
         if self.hdf5_replay_config is None:
@@ -1647,6 +1928,86 @@ class LiveControlledScene:
             )
         except Exception as exc:
             bridge.log("hdf5_replay_robot_state_sync_failed", {"reason": reason, "error": str(exc)})
+
+    def stabilize_robot_after_reset(self):
+        if self.robot is None:
+            return
+        try:
+            if hasattr(self.robot, "set_linear_velocity"):
+                self.robot.set_linear_velocity(th.zeros(3, dtype=th.float32))
+            if hasattr(self.robot, "set_angular_velocity"):
+                self.robot.set_angular_velocity(th.zeros(3, dtype=th.float32))
+            if hasattr(self.robot, "get_joint_positions") and hasattr(self.robot, "set_joint_velocities"):
+                joint_positions = self.robot.get_joint_positions()
+                if joint_positions is not None:
+                    self.robot.set_joint_velocities(th.zeros_like(joint_positions), drive=False)
+            if hasattr(self.robot, "keep_still"):
+                self.robot.keep_still()
+        except Exception as exc:
+            bridge.log("robot_reset_stabilization_failed", {"reason": str(exc)})
+
+    def settle_runtime_reset(self, steps=2):
+        if self.env is None or self.zero_action is None:
+            return
+        for _ in range(max(int(steps), 0)):
+            try:
+                self.env.step(action=self.zero_action, n_render_iterations=1)
+            except TypeError:
+                self.env.step(action=self.zero_action)
+
+    def restore_runtime_initial_state(self, reason="runtime_reset"):
+        interrupted_eval = None
+        if reason in {"manual_runtime_reset", "scene_reset"}:
+            interrupted_eval = self.finalize_task_evaluation_for_interruption(f"interrupted_by_{reason}")
+        self.robot_replay_active = False
+        self.robot_replay_paused = False
+        self.robot_replay_step = 0
+        self.robot_task_end_t = None
+        self.pending_robot_task = False
+        self.state.robot.status = "idle"
+        self.state.robot.task = None
+        self.state.robot.replay_id = None
+        self.hdf5_state_replay_failed = False
+        robot_source = None
+        object_source = None
+        reset_invoked = False
+        if self.robot is not None and hasattr(self.robot, "reset"):
+            try:
+                self.robot.reset()
+                reset_invoked = True
+            except Exception as exc:
+                bridge.log("robot_reset_failed", {"reason": reason, "error": str(exc)})
+        if self.hdf5_replay_config is not None and (self.hdf5_replay_config.get("robot_state") or {}):
+            self.sync_hdf5_replay_robot_state(reason)
+            robot_source = "hdf5_replay.robot_state"
+        else:
+            self.apply_robot_initial_pose()
+            robot_source = "scene_profile.robot"
+        self.stabilize_robot_after_reset()
+        if self.hdf5_replay_config is not None and (self.hdf5_replay_config.get("object_states") or {}):
+            self.sync_hdf5_replay_object_poses(reason)
+            object_source = "hdf5_replay.object_states"
+        self.last_robot_action_record = {
+            "source": "zero",
+            "step": None,
+            "vector": None,
+            "controller": None,
+            "normalized": None,
+        }
+        self.settle_runtime_reset()
+        payload = {
+            "event": "runtime_initial_state_restored",
+            "reason": reason,
+            "robot_source": robot_source,
+            "object_source": object_source,
+            "robot_reset_invoked": reset_invoked,
+            "replay_stopped": True,
+            "scene_variant": self.active_scene_variant,
+            "scene_file": None if self.active_scene_file is None else str(self.active_scene_file),
+            "task_evaluation": interrupted_eval,
+        }
+        bridge.log("runtime_initial_state_restored", payload)
+        return payload
 
     def add_scene_profile_object_placeholder(self, spec, reason: str):
         name = f"{spec['name']}_placeholder"
@@ -1787,17 +2148,216 @@ class LiveControlledScene:
             try:
                 position, orientation = obj.get_position_orientation()
                 pos = [float(value) for value in position.tolist()]
+                target_center = (self.task_eval.get("target") or {}).get("center") if hasattr(self, "task_eval") else None
                 states[name] = {
                     "available": True,
                     "position": pos,
                     "orientation_xyzw": [float(value) for value in orientation.tolist()],
                     "held_by": None,
                     "on_floor": bool(pos[2] < 0.12),
-                    "distance_to_goal_m": None,
+                    "distance_to_goal_m": self.vec_distance(pos, target_center) if target_center is not None else None,
                 }
             except Exception as exc:
                 states[name] = {"available": False, "reason": str(exc)}
         return states
+
+    def scene_object_by_name(self, name):
+        try:
+            return self.env.scene.object_registry("name", name)
+        except Exception:
+            return None
+
+    def object_pose(self, name):
+        obj = self.scene_object_by_name(name)
+        if obj is None:
+            return None, None
+        try:
+            position, orientation = obj.get_position_orientation()
+            return [float(value) for value in position.tolist()], [float(value) for value in orientation.tolist()]
+        except Exception:
+            return None, None
+
+    def object_position(self, name):
+        position, _ = self.object_pose(name)
+        return position
+
+    def object_cap_point(self, name, offset_m=TASK_EVAL_CAP_OFFSET_M):
+        position, orientation = self.object_pose(name)
+        if position is None or orientation is None:
+            return None
+        try:
+            offset = T.quat_apply(
+                th.tensor(orientation, dtype=th.float32),
+                th.tensor([0.0, 0.0, float(offset_m)], dtype=th.float32),
+            )
+            return [float(position[idx]) + float(offset[idx]) for idx in range(3)]
+        except Exception:
+            return [float(position[0]), float(position[1]), float(position[2]) + float(offset_m)]
+
+    @staticmethod
+    def vec_distance(a, b):
+        if a is None or b is None:
+            return None
+        return math.sqrt(sum((float(a[idx]) - float(b[idx])) ** 2 for idx in range(min(len(a), len(b), 3))))
+
+    def robot_gripper_points(self):
+        points = []
+        if self.robot is None:
+            return points
+        links = getattr(self.robot, "links", {}) or {}
+        tokens = ("finger", "gripper", "eef", "wrist", "hand", "palm")
+        for name, link in links.items():
+            link_name = str(name).lower()
+            if not any(token in link_name for token in tokens):
+                continue
+            try:
+                position, _ = link.get_position_orientation()
+                points.append(
+                    {
+                        "link": str(name),
+                        "position": [float(value) for value in position.tolist()],
+                    }
+                )
+            except Exception:
+                continue
+        if points:
+            return points
+        robot_pos = self.current_robot_position()
+        return [] if robot_pos is None else [{"link": "robot_root_fallback", "position": robot_pos}]
+
+    def task_eval_target_for_current_context(self):
+        resident_pos = _get_dummy_position(self.dummy_root).tolist() if self.dummy_root is not None else None
+        if resident_pos is not None:
+            center = [float(resident_pos[0]), float(resident_pos[1]), 0.75]
+            return {
+                "source": "resident_context",
+                "center": center,
+                "half_extents": list(TASK_EVAL_TARGET_HALF_EXTENTS),
+                "activity_id": self.activity_state.activity_id,
+                "resident_zone": self.ground_truth_resident_zone(),
+            }
+        return {
+            "source": "fallback_scene_center",
+            "center": [0.0, 0.0, 0.75],
+            "half_extents": list(TASK_EVAL_TARGET_HALF_EXTENTS),
+            "activity_id": self.activity_state.activity_id,
+            "resident_zone": self.ground_truth_resident_zone(),
+        }
+
+    def start_task_evaluation(self, task):
+        self.task_eval = self.empty_task_eval()
+        self.task_eval.update(
+            {
+                "enabled": True,
+                "task": task,
+                "replay_id": self.hdf5_replay_id,
+                "label": "running",
+                "started_at_wall_time_s": float(time()),
+                "updated_at_wall_time_s": float(time()),
+            }
+        )
+        self.task_eval["target"] = self.task_eval_target_for_current_context()
+        obj_pos = self.object_position(TASK_EVAL_OBJECT_NAME)
+        self.task_eval["object"]["position"] = obj_pos
+        self.task_eval["object"]["initial_position"] = obj_pos
+        self.task_eval_last_update_t = time()
+        self.task_eval_last_object_pos = list(obj_pos) if obj_pos is not None else None
+
+    def update_task_evaluation(self, now):
+        if not self.task_eval.get("enabled") or self.task_eval.get("finalized"):
+            return
+        obj_pos = self.object_position(self.task_eval.get("object_name") or TASK_EVAL_OBJECT_NAME)
+        previous_t = self.task_eval_last_update_t
+        dt = max(0.0, float(now) - float(previous_t)) if previous_t is not None else 0.0
+        self.task_eval_last_update_t = float(now)
+        self.task_eval["updated_at_wall_time_s"] = float(now)
+        if obj_pos is None:
+            self.task_eval["reason"] = "object_unavailable"
+            return
+
+        cap_point = self.object_cap_point(self.task_eval.get("object_name") or TASK_EVAL_OBJECT_NAME)
+        if cap_point is None:
+            cap_point = [float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2]) + TASK_EVAL_CAP_OFFSET_M]
+        speed = 0.0
+        if self.task_eval_last_object_pos is not None and dt > 0.0:
+            distance = self.vec_distance(obj_pos, self.task_eval_last_object_pos) or 0.0
+            speed = distance / dt
+        self.task_eval_last_object_pos = list(obj_pos)
+        self.task_eval["object"].update({"position": obj_pos, "cap_point": cap_point, "speed_mps": float(speed)})
+
+        gripper_points = self.robot_gripper_points()
+        cap_distances = [
+            self.vec_distance(point["position"], cap_point)
+            for point in gripper_points
+            if point.get("position") is not None
+        ]
+        cap_distances = [distance for distance in cap_distances if distance is not None]
+        min_cap_distance = min(cap_distances) if cap_distances else None
+        contact = bool(min_cap_distance is not None and min_cap_distance <= TASK_EVAL_GRIPPER_RADIUS_M)
+        grasp = self.task_eval["subgoals"]["grasp"]
+        grasp["contact"] = contact
+        grasp["min_cap_distance_m"] = min_cap_distance
+        grasp["hold_s"] = float(grasp.get("hold_s", 0.0) + dt) if contact else 0.0
+        if grasp["hold_s"] >= TASK_EVAL_GRASP_HOLD_S:
+            grasp["success"] = True
+
+        moving = bool(speed >= TASK_EVAL_MOVE_SPEED_THRESHOLD_MPS)
+        transport = self.task_eval["subgoals"]["transport"]
+        transport["max_speed_mps"] = max(float(transport.get("max_speed_mps", 0.0)), float(speed))
+        transport["moving_streak_s"] = float(transport.get("moving_streak_s", 0.0) + dt) if moving else 0.0
+        if transport["moving_streak_s"] >= TASK_EVAL_MOVE_HOLD_S:
+            transport["success"] = True
+
+        target = self.task_eval.get("target") or {}
+        center = target.get("center")
+        half = target.get("half_extents") or TASK_EVAL_TARGET_HALF_EXTENTS
+        inside = bool(
+            center is not None
+            and all(abs(float(obj_pos[idx]) - float(center[idx])) <= float(half[idx]) for idx in range(3))
+        )
+        stable = bool(speed < TASK_EVAL_MOVE_SPEED_THRESHOLD_MPS)
+        place = self.task_eval["subgoals"]["place"]
+        place["inside_target"] = inside
+        place["hold_s"] = float(place.get("hold_s", 0.0) + dt) if inside and stable else 0.0
+        if place["hold_s"] >= TASK_EVAL_PLACE_HOLD_S:
+            place["success"] = True
+
+        self.recompute_task_evaluation_score()
+
+    def recompute_task_evaluation_score(self):
+        subgoals = self.task_eval.get("subgoals") or {}
+        score = 0.0
+        for name, weight in TASK_EVAL_WEIGHTS.items():
+            score += float(weight) if (subgoals.get(name) or {}).get("success") else 0.0
+        self.task_eval["score"] = round(score, 4)
+        self.task_eval["success"] = bool(score >= 0.999)
+        if self.task_eval.get("finalized"):
+            self.task_eval["label"] = "success" if self.task_eval["success"] else "partial_or_failed"
+        elif score > 0.0:
+            self.task_eval["label"] = "running_partial"
+        else:
+            self.task_eval["label"] = "running"
+
+    def finalize_task_evaluation(self, reason):
+        if not self.task_eval.get("enabled"):
+            return
+        self.update_task_evaluation(time())
+        self.task_eval["finalized"] = True
+        self.task_eval["finished_at_wall_time_s"] = float(time())
+        self.task_eval["reason"] = reason
+        self.recompute_task_evaluation_score()
+
+    def finalize_task_evaluation_for_interruption(self, reason):
+        if not self.task_eval.get("enabled") or self.task_eval.get("finalized"):
+            return None
+        self.finalize_task_evaluation(reason)
+        self.episode_logger.write("task_interrupted", self.episode_payload(event_reason=reason))
+        self.write_quality_report(status="task_interrupted", reason=reason)
+        self.close_task_dataset_run()
+        return self.task_evaluation_snapshot()
+
+    def task_evaluation_snapshot(self):
+        return json.loads(json.dumps(self.task_eval))
 
     def estimate_snapshot(self):
         confidence = self.resident_context.get("confidence")
@@ -1835,18 +2395,35 @@ class LiveControlledScene:
         }
 
     def training_validity_snapshot(self):
+        task_eval_enabled = bool(self.task_eval.get("enabled"))
+        task_eval_finalized = bool(self.task_eval.get("finalized"))
         return {
             "context_model": True,
             "task_selection": True,
             "safety_eval": True,
-            "policy_behavior_cloning": False,
-            "policy_rollout_eval": False,
-            "policy_invalid_reason": "no_replay_action_label",
-            "usable_for": ["context_baseline", "task_selection", "safety_eval"],
+            "policy_behavior_cloning": bool(self.hdf5_replay_actions is not None),
+            "policy_rollout_eval": task_eval_enabled,
+            "policy_invalid_reason": None if task_eval_enabled else "no_task_outcome_label",
+            "task_outcome_eval": {
+                "enabled": task_eval_enabled,
+                "finalized": task_eval_finalized,
+                "score": self.task_eval.get("score"),
+                "success": self.task_eval.get("success"),
+            },
+            "usable_for": [
+                "context_baseline",
+                "task_selection",
+                "safety_eval",
+                "behavior_cloning",
+                "task_outcome_eval",
+            ]
+            if task_eval_enabled
+            else ["context_baseline", "task_selection", "safety_eval"],
         }
 
     def update_episode_metrics(self):
         self.episode_metrics["frame_count"] += 1
+        self.update_task_evaluation(time())
         distance = self.current_robot_resident_distance()
         if distance is None:
             return
@@ -1895,6 +2472,7 @@ class LiveControlledScene:
             "estimates": data.get("estimates"),
             "sensor_quality": data.get("sensor_quality"),
             "risk": data.get("risk"),
+            "task_evaluation": data.get("task_evaluation"),
             "training_validity": data.get("training_validity"),
             "episode_phase": self.episode_phase(),
             "metrics": dict(self.episode_metrics),
@@ -1904,9 +2482,12 @@ class LiveControlledScene:
         if self.episode_id <= 0:
             return
         self.episode_logger.write("episode_end", self.episode_payload(event_reason=reason))
+        self.write_quality_report(status="closed", reason=reason)
+
+    def write_quality_report(self, status="open", reason=None):
         self.episode_logger.write_quality_report(
             {
-                "status": "closed",
+                "status": status,
                 "last_episode_id": self.episode_id,
                 "episode_count": self.episode_id,
                 "step_count": int(self.episode_metrics.get("frame_count") or 0),
@@ -1917,12 +2498,91 @@ class LiveControlledScene:
                 "task_blocked": bool(self.episode_metrics.get("task_blocked")),
                 "last_task": self.episode_metrics.get("last_task"),
                 "last_replay_id": self.episode_metrics.get("last_replay_id"),
+                "task_evaluation": self.task_evaluation_snapshot(),
                 "camera_frame_counts": dict(self.camera_frame_counts),
                 "camera_frame_missing_counts": dict(self.camera_frame_missing_counts),
                 "missing_frame_ratio": self.camera_missing_frame_ratio(),
                 "missing_state_ratio": None,
             }
         )
+
+    def scenario_metadata_snapshot(self):
+        return {
+            "episode_id": self.episode_id,
+            "episode_seed": self.episode_seed,
+            "episode_zone": self.episode_zone,
+            "scenario_type": self.episode_scenario_type or self.infer_scenario_type(),
+            "resident": {
+                "zone": self.ground_truth_resident_zone(),
+                "position": list(self.human_target_pos) if self.human_target_pos is not None else None,
+                "heading_deg": float(self.human_heading_deg),
+                "posture": self.activity_state.posture,
+                "movement_enabled": bool(self.activity_state.movement_enabled),
+            },
+            "activity_context": {
+                "activity_id": self.activity_state.activity_id,
+                "ground_truth_zone": self.activity_state.ground_truth_zone,
+                "spawn_points": list(self.activity_state.spawn_points or []),
+                "virtual_sensors": dict(self.activity_state.virtual_sensors),
+                "estimated_context": dict(self.resident_context),
+            },
+            "sensors": {
+                "layout": self.sensor_layout,
+                "active_motion_sensors": list(getattr(self.sensor_rig, "active_motion_sensor_names", []))
+                if self.sensor_rig is not None
+                else [],
+                "initial_readings": self.current_readings,
+            },
+        }
+
+    def begin_task_dataset_run(self, task, replay_id=None, selection=None, reset_snapshot=None):
+        self.reset_task_run_counters()
+        replay_id = replay_id or self.hdf5_replay_id
+        scenario = self.episode_scenario_type or self.infer_scenario_type()
+        run_dir = self.episode_logger.begin_run(
+            metadata={
+                "schema_version": "homesense_task_run_metadata_v1",
+                "task": {
+                    "name": task,
+                    "replay_id": replay_id,
+                    "selection": selection,
+                    "reset_snapshot": reset_snapshot,
+                    "playback_mode": self.hdf5_replay_playback_mode,
+                },
+                "scenario": self.scenario_metadata_snapshot(),
+                "files": {
+                    "events": "metadata/events.jsonl",
+                    "steps": "data/steps.jsonl",
+                    "annotations": "metadata/annotations.json",
+                    "quality_report": "metadata/quality_report.json",
+                    "hdf5": "metadata/dataset.hdf5",
+                    "camera_dir": "data/cameras/<robot_camera_name>/",
+                },
+            },
+            name_parts=[
+                f"ep{self.episode_id:04d}",
+                scenario,
+                replay_id,
+            ],
+        )
+        if run_dir is not None:
+            bridge.log(
+                "dataset_task_run_started",
+                {
+                    "run_dir": str(run_dir),
+                    "episode_id": self.episode_id,
+                    "scenario_type": scenario,
+                    "task": task,
+                    "replay_id": replay_id,
+                },
+            )
+        return run_dir
+
+    def close_task_dataset_run(self):
+        current_run_dir = self.episode_logger.run_dir
+        self.episode_logger.end_run()
+        if current_run_dir is not None:
+            bridge.log("dataset_task_run_closed", {"run_dir": str(current_run_dir)})
 
     def start_episode(self, zone="random", reason="manual", randomize=True):
         if self.state.robot.busy:
@@ -1931,16 +2591,25 @@ class LiveControlledScene:
             self.finish_episode(reason=f"superseded_by_{reason}")
         self.clear_viewport_input()
         self.human_input_vector = (0.0, 0.0, 0.0)
+        reset_snapshot = {
+            "event": "runtime_initial_state_deferred",
+            "reason": f"episode_start:{reason}",
+            "deferred_to": "replay_start",
+        }
         self.state.robot.status = "idle"
         self.state.robot.task = None
         self.state.robot.replay_id = None
         self.robot_task_end_t = None
         self.robot_replay_active = False
+        self.robot_replay_paused = False
         self.robot_replay_step = 0
         self.episode_id += 1
         self.episode_started_at = utc_now_iso()
         self.episode_scenario_type = None
         self.episode_metrics = self.empty_episode_metrics()
+        self.task_eval = self.empty_task_eval()
+        self.task_eval_last_update_t = None
+        self.task_eval_last_object_pos = None
         if randomize:
             self.episode_zone = self.choose_episode_zone(zone)
             self.activity_state = self.activity_simulator.start_episode(self.episode_zone, self.rng)
@@ -1972,10 +2641,17 @@ class LiveControlledScene:
                 "episode_id": self.episode_id,
                 "zone": self.episode_zone,
                 "position": self.human_target_pos,
+                "reset_snapshot": reset_snapshot,
                 "log_path": str(self.episode_logger.path) if self.episode_logger.path else None,
             },
         )
-        return {"event": "episode_started", "episode_id": self.episode_id, "zone": self.episode_zone, "position": self.human_target_pos}
+        return {
+            "event": "episode_started",
+            "episode_id": self.episode_id,
+            "zone": self.episode_zone,
+            "position": self.human_target_pos,
+            "reset_snapshot": reset_snapshot,
+        }
 
     def update_human_motion(self):
         now = time()
@@ -2306,6 +2982,56 @@ class LiveControlledScene:
         mode, position, look_at = self._viewer_camera_pose(self.state.camera_mode)
         self._apply_viewer_camera_pose(mode, position, look_at)
 
+    def select_hdf5_replay_for_current_context(self):
+        if not self.hdf5_replay_paths:
+            return {"event": "hdf5_replay_select_skipped", "reason": "no_hdf5_replays"}
+        activity_id = self.activity_state.activity_id
+        target_key = SCENARIO_REPLAY_RULES.get(activity_id)
+        if target_key is None:
+            return {
+                "event": "hdf5_replay_select_skipped",
+                "reason": "no_activity_mapping",
+                "activity_id": activity_id,
+                "current_replay_id": self.hdf5_replay_id,
+            }
+        selected_path = None
+        for path in self.hdf5_replay_paths:
+            if self.replay_key_for_path(path) == target_key or Path(path).stem == target_key:
+                selected_path = path
+                break
+        if selected_path is None:
+            return {
+                "event": "hdf5_replay_select_failed",
+                "activity_id": activity_id,
+                "target_replay_key": target_key,
+                "available_replays": [path.stem for path in self.hdf5_replay_paths],
+            }
+        if self.hdf5_replay_config is not None and Path(self.hdf5_replay_config.get("path", "")).resolve() == Path(selected_path).resolve():
+            return {
+                "event": "hdf5_replay_selected",
+                "activity_id": activity_id,
+                "replay_id": self.hdf5_replay_id,
+                "reason": "already_loaded",
+            }
+        self.load_hdf5_replay(selected_path, reason=f"activity:{activity_id}")
+        return {
+            "event": "hdf5_replay_selected",
+            "activity_id": activity_id,
+            "replay_id": self.hdf5_replay_id,
+            "path": str(selected_path),
+            "reason": "activity_mapping",
+        }
+
+    def toggle_replay_pause(self):
+        if not self.robot_replay_active:
+            return {"event": "hdf5_replay_pause_ignored", "reason": "replay_not_running"}
+        self.robot_replay_paused = not self.robot_replay_paused
+        return {
+            "event": "hdf5_replay_paused" if self.robot_replay_paused else "hdf5_replay_resumed",
+            "replay_id": self.hdf5_replay_id,
+            "step": int(self.robot_replay_step),
+        }
+
     def run_task(self, task):
         if self.state.robot.busy:
             return {"event": "task_blocked", "task": task, "reason": "robot already busy"}
@@ -2313,18 +3039,35 @@ class LiveControlledScene:
         self.human_input_vector = (0.0, 0.0, 0.0)
         self.human_target_pos = _get_dummy_position(self.dummy_root).tolist()
         if task == "deliver_item" and self.hdf5_replay_actions is not None:
-            self.sync_hdf5_replay_object_poses("replay_start")
-            self.sync_hdf5_replay_robot_state("replay_start")
+            selection = self.select_hdf5_replay_for_current_context()
+            bridge.log(selection.get("event", "hdf5_replay_selected"), selection)
+            if selection.get("event") != "hdf5_replay_selected":
+                self.episode_metrics["task_blocked"] = True
+                self.episode_logger.write("task_blocked", self.episode_payload(event_reason=selection.get("reason", "no_matching_hdf5_replay")))
+                return {
+                    "event": "task_blocked",
+                    "task": task,
+                    "reason": "no_matching_hdf5_replay_for_activity",
+                    "selection": selection,
+                }
+            reset_snapshot = self.restore_runtime_initial_state(reason="replay_start")
             self.state.robot.status = "running_replay"
             self.state.robot.task = task
             self.state.robot.replay_id = self.hdf5_replay_id
             self.robot_replay_active = True
+            self.robot_replay_paused = False
             self.robot_replay_step = 0
             self.robot_task_end_t = None
+            run_dir = self.begin_task_dataset_run(
+                task,
+                replay_id=self.hdf5_replay_id,
+                selection=selection,
+                reset_snapshot=reset_snapshot,
+            )
             self.episode_metrics["task_started"] = True
             self.episode_metrics["last_task"] = task
             self.episode_metrics["last_replay_id"] = self.hdf5_replay_id
-            self.set_camera("robot")
+            self.start_task_evaluation(task)
             self.episode_logger.write("task_started", self.episode_payload(event_reason="hdf5_action_replay_started"))
             bridge.log(
                 "hdf5_action_replay_started",
@@ -2332,7 +3075,11 @@ class LiveControlledScene:
                     "task": task,
                     "replay_id": self.hdf5_replay_id,
                     "num_actions": int(self.hdf5_replay_actions.shape[0]),
+                    "playback_mode": self.hdf5_replay_playback_mode,
+                    "selection": selection,
                     "camera_mode": self.state.camera_mode,
+                    "reset_snapshot": reset_snapshot,
+                    "dataset_run_dir": str(run_dir) if run_dir is not None else None,
                 },
             )
             return {
@@ -2340,6 +3087,10 @@ class LiveControlledScene:
                 "task": task,
                 "replay_id": self.hdf5_replay_id,
                 "num_actions": int(self.hdf5_replay_actions.shape[0]),
+                "playback_mode": self.hdf5_replay_playback_mode,
+                "selection": selection,
+                "reset_snapshot": reset_snapshot,
+                "dataset_run_dir": str(run_dir) if run_dir is not None else None,
             }
         try:
             replay = self.registry.select(TaskCommand(task=task), self.state)
@@ -2354,9 +3105,11 @@ class LiveControlledScene:
         self.state.robot.status = "running_replay"
         self.state.robot.task = task
         self.state.robot.replay_id = replay.replay_id
+        self.begin_task_dataset_run(task, replay_id=replay.replay_id)
         self.episode_metrics["task_started"] = True
         self.episode_metrics["last_task"] = task
         self.episode_metrics["last_replay_id"] = replay.replay_id
+        self.start_task_evaluation(task)
         self.robot_task_end_t = time() + self.args.task_duration_s
         self.episode_logger.write("task_started", self.episode_payload(event_reason="replay_started"))
         return {"event": "replay_started", "task": task, "replay_id": replay.replay_id, "context": self.state.robot.context}
@@ -2368,6 +3121,7 @@ class LiveControlledScene:
         human_start_pos = self.human_start_position(preset)
         self.clear_viewport_input()
         self.human_input_vector = (0.0, 0.0, 0.0)
+        reset_snapshot = self.restore_runtime_initial_state(reason="scene_reset")
         self.human_target_pos = self.find_nearest_free_position(human_start_pos)
         self.human_heading_deg = 0.0
         self._set_human_pose(self.human_target_pos, self.human_heading_deg)
@@ -2377,28 +3131,40 @@ class LiveControlledScene:
         self.state.robot.replay_id = None
         self.robot_task_end_t = None
         self.robot_replay_active = False
+        self.robot_replay_paused = False
         self.robot_replay_step = 0
         self.set_camera("overview")
         self.read_sensors()
-        return {"position": self.human_target_pos}
+        return {"position": self.human_target_pos, "reset_snapshot": reset_snapshot}
 
     def update_task(self):
         if self.robot_replay_active and self.hdf5_replay_actions is not None:
             if self.robot_replay_step >= len(self.hdf5_replay_actions):
                 self.state.robot.status = "completed"
                 self.robot_replay_active = False
+                self.robot_replay_paused = False
                 self.episode_metrics["task_completed"] = True
+                self.finalize_task_evaluation("hdf5_action_replay_finished")
                 self.episode_logger.write("task_completed", self.episode_payload(event_reason="hdf5_action_replay_finished"))
+                self.write_quality_report(status="task_completed", reason="hdf5_action_replay_finished")
+                self.close_task_dataset_run()
                 bridge.log(
                     "hdf5_action_replay_finished",
-                    {"replay_id": self.hdf5_replay_id, "steps": int(self.robot_replay_step)},
+                    {
+                        "replay_id": self.hdf5_replay_id,
+                        "steps": int(self.robot_replay_step),
+                        "task_evaluation": self.task_evaluation_snapshot(),
+                    },
                 )
             return
         if self.robot_task_end_t is not None and time() >= self.robot_task_end_t:
             self.state.robot.status = "completed"
             self.robot_task_end_t = None
             self.episode_metrics["task_completed"] = True
+            self.finalize_task_evaluation("task_duration_elapsed")
             self.episode_logger.write("task_completed", self.episode_payload(event_reason="task_duration_elapsed"))
+            self.write_quality_report(status="task_completed", reason="task_duration_elapsed")
+            self.close_task_dataset_run()
 
     def next_robot_action(self):
         if not self.robot_replay_active or self.hdf5_replay_actions is None:
@@ -2419,6 +3185,48 @@ class LiveControlledScene:
                 "normalized": None,
             }
             return self.zero_action
+        if self.robot_replay_paused:
+            self.last_robot_action_record = {
+                "source": "paused",
+                "replay_id": self.hdf5_replay_id,
+                "step": int(self.robot_replay_step),
+                "total_steps": int(len(self.hdf5_replay_actions)),
+                "vector": None,
+                "controller": self.hdf5_controller_summary(),
+                "normalized": bool((self.hdf5_replay_config or {}).get("robot_config", {}).get("action_normalize", False)),
+                "playback_mode": self.hdf5_replay_playback_mode,
+            }
+            return self.zero_action
+        if self.hdf5_replay_playback_mode == "state" and not self.hdf5_state_replay_failed:
+            try:
+                state = self.hdf5_replay_states[self.robot_replay_step]
+                state_size = int(self.hdf5_replay_state_sizes[self.robot_replay_step])
+                og.sim.load_state(state[:state_size], serialized=True)
+            except Exception as exc:
+                self.hdf5_state_replay_failed = True
+                self.robot_replay_active = False
+                self.robot_replay_paused = False
+                self.state.robot.status = "blocked"
+                bridge.log(
+                    "hdf5_state_replay_failed",
+                    {
+                        "replay_id": self.hdf5_replay_id,
+                        "step": int(self.robot_replay_step),
+                        "reason": str(exc),
+                        "fallback": None,
+                        "scene_file": None if self.active_scene_file is None else str(self.active_scene_file),
+                    },
+                )
+                self.last_robot_action_record = {
+                    "source": "blocked",
+                    "replay_id": self.hdf5_replay_id,
+                    "step": int(self.robot_replay_step),
+                    "vector": None,
+                    "controller": self.hdf5_controller_summary(),
+                    "normalized": bool((self.hdf5_replay_config or {}).get("robot_config", {}).get("action_normalize", False)),
+                    "playback_mode": self.hdf5_replay_playback_mode,
+                }
+                return self.zero_action
         action = self.hdf5_replay_actions[self.robot_replay_step]
         self.last_robot_action_record = {
             "source": "hdf5_replay",
@@ -2428,6 +3236,7 @@ class LiveControlledScene:
             "vector": self.compact_vector(action),
             "controller": self.hdf5_controller_summary(),
             "normalized": bool((self.hdf5_replay_config or {}).get("robot_config", {}).get("action_normalize", False)),
+            "playback_mode": self.hdf5_replay_playback_mode,
         }
         if self.robot_replay_step % 30 == 0:
             bridge.log(
@@ -2436,6 +3245,7 @@ class LiveControlledScene:
                     "replay_id": self.hdf5_replay_id,
                     "step": int(self.robot_replay_step),
                     "total": int(len(self.hdf5_replay_actions)),
+                    "playback_mode": self.hdf5_replay_playback_mode,
                 },
             )
         self.robot_replay_step += 1
@@ -2556,6 +3366,15 @@ class LiveControlledScene:
         data["risk"] = self.risk_snapshot()
         data["objects"] = data["ground_truth"].get("objects", {})
         data["action"] = dict(self.last_robot_action_record)
+        data["hdf5_replay"] = {
+            "active": bool(self.robot_replay_active),
+            "paused": bool(self.robot_replay_paused),
+            "replay_id": self.hdf5_replay_id,
+            "step": int(self.robot_replay_step),
+            "playback_mode": self.hdf5_replay_playback_mode,
+            "available": [path.stem for path in self.hdf5_replay_paths],
+        }
+        data["task_evaluation"] = self.task_evaluation_snapshot()
         data["training_validity"] = self.training_validity_snapshot()
         data["robot_pose"] = data["ground_truth"]["robot_pose"]
         data["episode_phase"] = self.episode_phase()
@@ -2604,6 +3423,7 @@ class LiveControlledScene:
                     "virtual": data.get("activity_context", {}).get("virtual_sensors"),
                 },
                 "action": data.get("action"),
+                "task_evaluation": data.get("task_evaluation"),
                 "objects": data.get("objects"),
                 "safety": data.get("risk"),
                 "human": data.get("human"),
@@ -2689,8 +3509,8 @@ def main():
     )
     parser.add_argument(
         "--episode-log-dir",
-        default="logs/homesense_episodes",
-        help="Directory, relative to the BEHAVIOR-1K root unless absolute, for JSONL episode logs.",
+        default="datasets/homesense_episodes",
+        help="Directory, relative to the project root unless absolute, for HomeSense training dataset runs.",
     )
     parser.add_argument("--disable-episode-logging", action="store_true", help="Disable JSONL episode logging.")
     parser.add_argument(
@@ -2754,7 +3574,25 @@ def main():
         default=None,
         help="Optional HDF5 action replay to run inside the HomeSense scene when T / deliver_item is triggered.",
     )
+    parser.add_argument(
+        "--hdf5-replay-dir",
+        action="append",
+        default=["../replay-data"],
+        help="Directory containing selectable HDF5 replays. Can be passed multiple times.",
+    )
     parser.add_argument("--hdf5-replay-episode", type=int, default=0)
+    parser.add_argument(
+        "--hdf5-replay-playback",
+        choices=["auto", "action", "state"],
+        default="auto",
+        help="Replay actions only, or restore recorded simulator state before each action. Auto uses state playback when no base controller is recorded.",
+    )
+    parser.add_argument(
+        "--hdf5-replay-scene-source",
+        choices=["auto", "profile", "hdf5"],
+        default="auto",
+        help="Use the scene profile JSON or the scene JSON embedded in the HDF5. Auto uses the embedded scene for state playback.",
+    )
     parser.add_argument("--cpu-dynamics", action="store_true", help="Use CPU dynamics instead of GPU dynamics for heavier full-scene demos.")
     parser.add_argument(
         "--flatcache",

@@ -18,7 +18,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("logs/homesense_episodes/context_baseline_model.json"),
+        default=REPO_ROOT.parent / "datasets/homesense_episodes/context_baseline_model.json",
         help="Output model JSON path.",
     )
     parser.add_argument("--predict-activity", default=None, help="Optionally print a prediction for one activity id.")

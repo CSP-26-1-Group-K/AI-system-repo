@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
@@ -53,7 +56,7 @@ def main() -> None:
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=Path("logs/homesense_episodes"),
+        default=REPO_ROOT.parent / "datasets/homesense_episodes",
         help="HomeSense episode log directory.",
     )
     parser.add_argument("--apply", action="store_true", help="Actually move files. Without this flag, only prints a plan.")

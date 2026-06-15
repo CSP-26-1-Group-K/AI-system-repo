@@ -17,6 +17,7 @@ class SceneProfile:
     pressure_sensors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     zones: dict[str, dict[str, Any]] = field(default_factory=dict)
     encoder: dict[str, Any] = field(default_factory=dict)
+    scene_file: str | None = None
     doorless_scene_file: str | None = None
     doorless_portals: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     door_object_names: tuple[str, ...] = field(default_factory=tuple)
@@ -88,6 +89,7 @@ def load_scene_profile(repo_root: Path, scene_model: str) -> SceneProfile | None
         pressure_sensors=tuple(_pressure_sensor_spec(spec) for spec in data.get("pressure_sensors", [])),
         zones=dict(data.get("zones") or {}),
         encoder=dict(data.get("encoder") or {}),
+        scene_file=data.get("scene_file"),
         doorless_scene_file=data.get("doorless_scene_file"),
         doorless_portals=tuple(dict(portal) for portal in data.get("doorless_portals", [])),
         door_object_names=tuple(str(name) for name in data.get("door_object_names", [])),
