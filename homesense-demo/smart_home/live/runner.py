@@ -65,6 +65,7 @@ SCENARIO_REPLAY_RULES = {
     "arriving_home": "delivery_med_room_2_sc",
     "watching_tv": "delivery_med_room_2_sc",
     "resting_on_sofa": "delivery_med_room_2_sc",
+    "playing_piano": "delivery_med_room_1_v01_repaired_v09",
     "lying_in_bed": "delivery_med_room_3",
     "toilet_use": "delivery_failure_case",
 }
@@ -257,12 +258,8 @@ class LiveControlledScene:
                 continue
             if not resolved.exists() or resolved in seen:
                 continue
-            # Keep automatic demo selection to the current v09 replay set.
-            if not (
-                resolved.stem.startswith("delivery_med_room_2")
-                or resolved.stem.startswith("delivery_med_room_3")
-                or resolved.stem.startswith("delivery_failure_case")
-            ):
+            # Keep automatic demo selection scoped to scenario-mapped replays.
+            if resolved.stem not in set(SCENARIO_REPLAY_RULES.values()):
                 continue
             seen.add(resolved)
             paths.append(resolved)
@@ -632,6 +629,11 @@ class LiveControlledScene:
         self.episode_logger.write_manifest(
             {
                 "schema_version": "homesense_dataset_session_v1",
+                "gym_framework": self.gym_framework_metadata(
+                    task="deliver_item",
+                    replay_id=self.hdf5_replay_id,
+                    policy_source="teleoperation_replay" if self.hdf5_replay_actions is not None else "manual_or_scripted",
+                ),
                 "quality_schema_version": "homesense_quality_v1",
                 "dataset_type": "multimodal_smart_home_robot_task_runs",
                 "dataset_unit": "task_replay_run",
@@ -2421,6 +2423,40 @@ class LiveControlledScene:
             else ["context_baseline", "task_selection", "safety_eval"],
         }
 
+    def gym_framework_metadata(self, task=None, replay_id=None, policy_source=None):
+        scene_model = self.scene_profile.scene_model if self.scene_profile else (self.args.scene_model or PRESETS[self.args.preset]["scene"])
+        scene_variant = self.active_scene_variant or "profile"
+        env_suffix = "v09" if scene_model == "Merom_0_int" else self.safe_camera_name(scene_variant, "default")
+        task_name = str(task or self.state.robot.task or "unknown_task")
+        task_id = "medicine_delivery" if task_name in {"deliver_item", "medicine_delivery"} else self.safe_camera_name(task_name)
+        scenario_id = self.activity_state.activity_id or self.episode_scenario_type or self.infer_scenario_type()
+        return {
+            "framework_id": "homesense_gym",
+            "schema_version": "homesense_gym_v1",
+            "registry_path": "smart_home/configs/gym_registry.yaml",
+            "env_id": f"{self.safe_camera_name(scene_model).lower()}_{env_suffix}",
+            "scene_model": scene_model,
+            "scene_variant": scene_variant,
+            "robot_id": self.safe_camera_name(self.args.robot_type or "r1pro").lower(),
+            "task_id": task_id,
+            "task_name": task_name,
+            "scenario_id": self.safe_camera_name(scenario_id or "unspecified").lower(),
+            "resident_zone_id": self.safe_camera_name(self.ground_truth_resident_zone()).lower(),
+            "sensor_layout_id": self.safe_camera_name(self.sensor_layout or "current").lower(),
+            "policy_source": policy_source
+            or ("teleoperation_replay" if (replay_id or self.hdf5_replay_id) else "manual_or_scripted"),
+            "replay_id": replay_id or self.hdf5_replay_id,
+            "evaluator_id": "medicine_delivery_v1" if task_id == "medicine_delivery" else f"{task_id}_v1",
+            "dataset_format": "homesense_task_run_v1",
+            "future_integrations": {
+                "nvidia_cosmos": {
+                    "status": "todo",
+                    "interface": "video_action_context_label_export",
+                    "intended_use": "world_model_rollout_prediction_and_synthetic_variation_generation",
+                }
+            },
+        }
+
     def update_episode_metrics(self):
         self.episode_metrics["frame_count"] += 1
         self.update_task_evaluation(time())
@@ -2542,6 +2578,11 @@ class LiveControlledScene:
         run_dir = self.episode_logger.begin_run(
             metadata={
                 "schema_version": "homesense_task_run_metadata_v1",
+                "gym_framework": self.gym_framework_metadata(
+                    task=task,
+                    replay_id=replay_id,
+                    policy_source="teleoperation_replay" if replay_id else "manual_or_scripted",
+                ),
                 "task": {
                     "name": task,
                     "replay_id": replay_id,

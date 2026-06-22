@@ -1,0 +1,72 @@
+framework_id: homesense_gym
+schema_version: homesense_gym_registry_v1
+
+environments:
+  - env_id: merom_0_int_v09
+    scene_model: Merom_0_int
+    scene_file: smart_home/configs/scenes/Merom_0_int.demo_v09.json
+    simulator: Isaac Sim / OmniGibson
+    domain: residential_smart_home
+
+robots:
+  - robot_id: r1pro
+    model: R1Pro
+    embodiment: mobile_manipulator_humanoid
+    source: Galaxea R1Pro asset
+
+tasks:
+  - task_id: medicine_delivery
+    task_name: deliver_item
+    object_name: medicine_bottle_0
+    evaluator_id: medicine_delivery_v1
+    policy_sources:
+      - teleoperation_replay
+      - future_policy_rollout
+      - future_cosmos_generated_rollout
+
+scenarios:
+  - scenario_id: resident_activity_context
+    description: Resident zone, pose, and virtual smart-home sensor context.
+  - scenario_id: resident_near_robot
+    description: Resident is close to the robot start area.
+  - scenario_id: bathroom_occupied
+    description: Resident occupies bathroom-related contexts.
+  - scenario_id: arrival_context
+    description: Resident is near the entry area.
+  - scenario_id: laundry_ready
+    description: Resident or virtual sensors indicate laundry context.
+
+sensor_layouts:
+  - sensor_layout_id: sparse
+    description: Minimal smart-home motion sensor coverage.
+  - sensor_layout_id: current
+    description: Standard demo sensor layout.
+  - sensor_layout_id: dense
+    description: Higher-coverage sensor layout for fewer blind spots.
+
+evaluators:
+  - evaluator_id: medicine_delivery_v1
+    object_name: medicine_bottle_0
+    subgoals:
+      - name: grasp
+        weight: 0.30
+      - name: transport
+        weight: 0.30
+      - name: place
+        weight: 0.40
+
+dataset_formats:
+  - dataset_format: homesense_task_run_v1
+    unit: one_robot_task_execution
+    modalities:
+      - robot_action
+      - robot_state
+      - robot_camera_frame
+      - resident_context
+      - smart_home_sensor_context
+      - task_quality_label
+
+future_integrations:
+  - integration_id: nvidia_cosmos
+    status: todo
+    purpose: Use exported video/action/context/label task runs for world-model rollout prediction and synthetic variation generation.
